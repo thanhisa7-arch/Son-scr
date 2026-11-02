@@ -1,0 +1,3851 @@
+-- lang: Luau | file: BomHub_v9.lua | runtime: Roblox (LocalScript / executor)
+-- v9.8: Fake Admin dong bo qua tag_server.js (SYNC_URL). v9.7: them tab Fake Admin (chi ADMIN). v9.6: them tab Fake Chat. v9.5: tab Chat Server (chi trong server hien tai, khong can server ngoai), mini menu RIENG cho Bay / Bay V2 / Toc Do / Toc Do V2
+
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local HttpService      = game:GetService("HttpService")
+local TeleportService  = game:GetService("TeleportService")
+local Stats            = game:GetService("Stats")
+
+-- iPhone / điện thoại: có cảm ứng, không có chuột
+local IS_TOUCH = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+
+local LocalPlayer = Players.LocalPlayer
+local PlayerGui   = LocalPlayer:WaitForChild("PlayerGui")
+local Camera      = workspace.CurrentCamera
+
+-- DANH HIỆU: chọn ở màn hình sau khi load xong (ADMIN hoặc MEMBER). Chỉ mang tính hình thức.
+local ROLE = "member"
+-- Danh sách mã được phép chọn ADMIN. Muốn thêm mã mới thì thêm vào trong ngoặc, cách nhau bằng dấu phẩy:
+-- ví dụ {"1", "mã-hai", "mã-ba"}. Để trống {} = không ai chọn được ADMIN.
+local ADMIN_KEYS = {"1"}
+
+local DESIGN_W, DESIGN_H = 720, 440
+local MIN_SCALE, MAX_SCALE = 0.4, 1
+local SHADOW_PAD = 48
+local MenuAnimating = false -- đang chạy animation bật/tắt menu thì không cho fitToScreen đụng vào scale
+local ShadowLayers = {}
+
+----------------------------------------------------------------
+-- SETTINGS (tự lưu nếu executor có writefile/readfile)
+----------------------------------------------------------------
+local SETTINGS_FILE = "BomHub_settings.json"
+local Settings = {lang = "vi", preset = "blue", hue = 0.6, island = true, islandX = 0, islandY = 10}
+
+pcall(function()
+    if isfile and readfile and isfile(SETTINGS_FILE) then
+        local data = HttpService:JSONDecode(readfile(SETTINGS_FILE))
+        if type(data) == "table" then
+            if data.lang == "vi" or data.lang == "en" then Settings.lang = data.lang end
+            if type(data.preset) == "string" then Settings.preset = data.preset end
+            if type(data.hue) == "number" then Settings.hue = math.clamp(data.hue, 0, 1) end
+            if type(data.island) == "boolean" then Settings.island = data.island end
+            if data.role == "admin" or data.role == "member" then Settings.role = data.role end
+            if type(data.islandX) == "number" then Settings.islandX = math.clamp(data.islandX, -3000, 3000) end
+            if type(data.islandY) == "number" then Settings.islandY = math.clamp(data.islandY, 0, 3000) end
+        end
+    end
+end)
+
+local function saveSettings()
+    pcall(function()
+        if writefile then writefile(SETTINGS_FILE, HttpService:JSONEncode(Settings)) end
+    end)
+end
+
+----------------------------------------------------------------
+-- THEME
+----------------------------------------------------------------
+local function rgb(r, g, b) return Color3.fromRGB(r, g, b) end
+
+local Presets = {
+    {id = "blue",   Panel = rgb(9,14,26),  Card = rgb(18,27,48), CardHi = rgb(26,38,64), Accent = rgb(58,150,255),  Good = rgb(80,220,140)},
+    {id = "purple", Panel = rgb(14,10,28), Card = rgb(28,20,50), CardHi = rgb(42,30,72), Accent = rgb(160,110,255), Good = rgb(80,220,140)},
+    {id = "red",    Panel = rgb(26,10,12), Card = rgb(46,20,24), CardHi = rgb(66,30,36), Accent = rgb(255,82,92),   Good = rgb(80,220,140)},
+    {id = "green",  Panel = rgb(8,22,16),  Card = rgb(16,40,30), CardHi = rgb(24,58,44), Accent = rgb(50,215,130),  Good = rgb(255,214,90)},
+    {id = "orange", Panel = rgb(26,16,8),  Card = rgb(46,30,16), CardHi = rgb(66,44,24), Accent = rgb(255,150,50),  Good = rgb(80,220,140)},
+    {id = "pink",   Panel = rgb(28,10,22), Card = rgb(48,20,40), CardHi = rgb(68,30,58), Accent = rgb(255,105,190), Good = rgb(80,220,140)},
+}
+
+local Theme = {Text = rgb(245, 248, 255), SubText = rgb(140, 160, 200)}
+local THEME_KEYS = {"Panel", "Card", "CardHi", "Accent", "Good"}
+
+local function setThemeFromPreset(p)
+    for _, k in ipairs(THEME_KEYS) do Theme[k] = p[k] end
+end
+
+local function setThemeFromHue(h)
+    Theme.Accent = Color3.fromHSV(h, 0.75, 1)
+    Theme.Panel  = Color3.fromHSV(h, 0.65, 0.10)
+    Theme.Card   = Color3.fromHSV(h, 0.55, 0.19)
+    Theme.CardHi = Color3.fromHSV(h, 0.50, 0.27)
+    Theme.Good   = (h > 0.2 and h < 0.45) and rgb(255, 214, 90) or rgb(80, 220, 140)
+end
+
+do
+    if Settings.preset == "custom" then
+        setThemeFromHue(Settings.hue)
+    else
+        local found
+        for _, p in ipairs(Presets) do
+            if p.id == Settings.preset then found = p end
+        end
+        setThemeFromPreset(found or Presets[1])
+    end
+end
+
+-- registry: mọi thứ có màu theme đều đăng ký ở đây để đổi màu đồng loạt
+local Themed, ThemeUpdaters = {}, {}
+
+local function themed(inst, prop, key)
+    table.insert(Themed, {inst, prop, key})
+    inst[prop] = Theme[key]
+    return inst
+end
+
+local function applyTheme()
+    for i = #Themed, 1, -1 do
+        local e = Themed[i]
+        if e[1] and e[1].Parent then
+            e[1][e[2]] = Theme[e[3]]
+        else
+            table.remove(Themed, i)
+        end
+    end
+    for _, fn in ipairs(ThemeUpdaters) do pcall(fn) end
+end
+
+----------------------------------------------------------------
+-- NGÔN NGỮ
+----------------------------------------------------------------
+local Lang = {
+    vi = {
+        menu_label = "Mục Lục", search = "Tìm Script",
+        nav_scripts = "Script", nav_server = "Máy Chủ", nav_misc = "Khác", nav_find = "Tra Script", nav_settings = "Cài Đặt", nav_lag = "Fix Lag", nav_halloween = "Halloween JJS",
+        nav_chat = "Chat Server", title_chat = "Chat trong server",
+        nav_fake = "Fake Chat", title_fake = "Chat giả (chỉ máy bạn thấy)",
+        fk_ph = "Nhập nội dung chat giả...", fk_apply = "Áp dụng", fk_pick = "Chọn người chơi",
+        fk_nopick = "Chưa chọn người chơi", fk_notext = "Chưa nhập nội dung", fk_done = "Đã áp dụng",
+        nav_fakeadmin = "Fake Admin", title_fakeadmin = "Fake Admin (chỉ ADMIN)",
+        sc_fk_dev = "Fake Developer", sc_fk_verify = "Fake Verify",
+        fa_hint = "Thẻ DEVELOPER và dấu Verified hiện trên đầu nhân vật bạn. Những ai cũng chạy hub này, cùng server game và cùng SYNC_URL sẽ thấy; người chơi thường không thấy.",
+        chat_ph = "Nhập tin nhắn...", chat_send = "Gửi",
+        chat_online = "Chat trong server này • dùng chat gốc của game", chat_nochannel = "Game này không cho gửi chat",
+        chat_offline = "Không kết nối được server chat", chat_nourl = "Chưa đặt CHAT_URL trong script",
+        chat_noreq = "Executor không hỗ trợ request", chat_cooldown = "Gửi chậm lại một chút",
+        chat_fail = "Gửi thất bại",
+        title_scripts = "Danh sách script", title_server = "Thông tin máy chủ", title_misc = "Tính năng khác", title_settings = "Cài đặt", title_lag = "Fix lag / tối ưu đồ họa", title_halloween = "Halloween • Jujutsu Shenanigans",
+        sc_god = "God Mode", sc_invis = "Tàng Hình", sc_fly = "Bay", sc_fly2 = "Bay V2", sc_speed = "Tốc Độ", sc_speed2 = "Tốc Độ V2",
+        sc_jump = "Nhảy Cao", sc_inf = "Nhảy Vô Hạn", sc_air = "Đi Trên Không V2", sc_cam = "Tăng Tầm Xa Camera",
+        pp_enable = "Bật tính năng", pp_speed = "Tốc độ",
+        role_admin = "ADMIN", role_member = "MEMBER", sv_role = "Chức danh",
+        ks_title = "Nhập mã admin", ks_ph = "Nhập mã...", ks_confirm = "Xác nhận", ks_back = "Quay lại", ks_wrong = "Mã không đúng", ks_nokey = "Chưa đặt mã admin trong script", ks_good = "Đúng mã!", ks_wait = "Sai nhiều lần, thử lại sau vài giây",
+        rs_title = "Chọn danh hiệu", rs_sub = "Bạn muốn vào menu với danh hiệu nào?", rs_member_desc = "Người dùng thường", rs_admin_desc = "Quản trị viên",
+        sv_player = "Người chơi", sv_count = "Số người", sv_ping = "Ping", sv_fps = "FPS", sv_job = "Job ID", sv_place = "Place ID",
+        sv_rejoin = "Vào lại server", sv_hop = "Đổi server", sv_copy = "Sao chép Job ID",
+        sv_hopping = "Đang tìm server...", sv_nohop = "Không tìm được server", sv_copied = "Đã sao chép", sv_noclip = "Không hỗ trợ",
+        sc_hw_esp = "Định Vị Cửa", sc_hw_steal = "Steal Door Fast",
+        hw_doors = "Cửa đang có", hw_near = "Cửa gần nhất",
+        hw_hint = "Tự tìm cửa trick-or-treat theo tên (door / pumpkin / trick / treat). Định Vị Cửa vẽ khung cam + khoảng cách. Steal Door Fast bỏ thời gian giữ nút (bạn tự đi tới cửa, không bị kéo đi). Nút bên dưới chỉ dịch chuyển tới cửa gần nhất và mở một lần khi bạn bấm.",
+        hw_go = "Đến cửa gần nhất & mở", hw_need = "Chưa thấy cửa (bật Định Vị Cửa)",
+        sc_lag_fx = "Tắt Hiệu Ứng", sc_lag_shadow = "Tắt Bóng Đổ", sc_lag_post = "Tắt Hậu Kỳ", sc_lag_mat = "Vật Liệu Nhẹ",
+        sc_lag_quality = "Đồ Họa Thấp Nhất", sc_lag_water = "Giảm Nước & Cỏ", sc_lag_fps = "Mở Khóa FPS",
+        lag_hint = "Chỉ giảm đồ họa trên máy bạn, người khác không bị ảnh hưởng. Tắt từng mục là khôi phục lại như cũ.",
+        ld_ui = "Đang tải giao diện...", ld_settings = "Đọc cài đặt...", ld_features = "Nạp tính năng...", ld_theme = "Áp dụng màu...", ld_ready = "Sẵn sàng!",
+        isl_on = "BẬT", isl_off = "TẮT", isl_open = "Mở menu", isl_hide = "Ẩn menu", isl_active = "đang bật", isl_none = "Chưa bật tính năng nào",
+        st_island = "Dynamic Island (viên thuốc trên đỉnh)",
+        lag_all = "Bật tất cả", lag_none = "Tắt / khôi phục tất cả",
+        ms_afk = "Chống AFK", ms_reset = "Reset nhân vật", ms_off = "Tắt hết tính năng", ms_close = "Gỡ menu",
+        st_lang = "Ngôn ngữ", st_color = "Màu menu", st_hue = "Màu tùy chỉnh (kéo thanh)",
+        st_keys = "Phím tắt: RightShift = ẩn / hiện menu",
+        st_keys_touch = "Chạm nút tròn để ẩn / hiện menu (kéo nút để di chuyển)",
+        lang_vi = "Tiếng Việt", lang_en = "English",
+    },
+    en = {
+        menu_label = "Menu", search = "Search script",
+        nav_scripts = "Scripts", nav_server = "Server", nav_misc = "Misc", nav_find = "Find Script", nav_settings = "Settings", nav_lag = "Fix Lag", nav_halloween = "Halloween JJS",
+        nav_chat = "Server Chat", title_chat = "This server chat",
+        nav_fake = "Fake Chat", title_fake = "Fake chat (only you see it)",
+        fk_ph = "Type the fake message...", fk_apply = "Apply", fk_pick = "Pick a player",
+        fk_nopick = "No player selected", fk_notext = "No message typed", fk_done = "Applied",
+        nav_fakeadmin = "Fake Admin", title_fakeadmin = "Fake Admin (ADMIN only)",
+        sc_fk_dev = "Fake Developer", sc_fk_verify = "Fake Verify",
+        fa_hint = "Shows a DEVELOPER tag and a Verified badge over your character. Anyone running this hub in the same game server with the same SYNC_URL sees it; regular players don't.",
+        chat_ph = "Type a message...", chat_send = "Send",
+        chat_online = "This server only • uses the game's own chat", chat_nochannel = "This game blocks chat sending",
+        chat_offline = "Can't reach chat server", chat_nourl = "CHAT_URL not set in script",
+        chat_noreq = "Executor has no request function", chat_cooldown = "Slow down a bit",
+        chat_fail = "Send failed",
+        title_scripts = "Script list", title_server = "Server info", title_misc = "Misc features", title_settings = "Settings", title_lag = "Fix lag / graphics boost", title_halloween = "Halloween • Jujutsu Shenanigans",
+        sc_god = "God Mode", sc_invis = "Invisible", sc_fly = "Fly", sc_fly2 = "Fly V2", sc_speed = "Speed", sc_speed2 = "Speed V2",
+        sc_jump = "High Jump", sc_inf = "Infinite Jump", sc_air = "Air Walk V2", sc_cam = "Camera Zoom+",
+        pp_enable = "Enable", pp_speed = "Speed",
+        role_admin = "ADMIN", role_member = "MEMBER", sv_role = "Role",
+        ks_title = "Enter admin key", ks_ph = "Enter key...", ks_confirm = "Confirm", ks_back = "Back", ks_wrong = "Wrong key", ks_nokey = "No admin key set in the script", ks_good = "Key accepted!", ks_wait = "Too many tries, wait a few seconds",
+        rs_title = "Choose your title", rs_sub = "Which title do you want to enter with?", rs_member_desc = "Regular user", rs_admin_desc = "Administrator",
+        sv_player = "Player", sv_count = "Players", sv_ping = "Ping", sv_fps = "FPS", sv_job = "Job ID", sv_place = "Place ID",
+        sv_rejoin = "Rejoin server", sv_hop = "Server hop", sv_copy = "Copy Job ID",
+        sv_hopping = "Searching...", sv_nohop = "No server found", sv_copied = "Copied", sv_noclip = "Not supported",
+        sc_hw_esp = "Door Locator", sc_hw_steal = "Steal Door Fast",
+        hw_doors = "Doors found", hw_near = "Nearest door",
+        hw_hint = "Finds trick-or-treat doors by name (door / pumpkin / trick / treat). Door Locator draws an orange outline + distance. Steal Door Fast removes the hold time (you walk to the door yourself, no auto-teleport). The button below teleports to the nearest door and opens it once, only when you press it.",
+        hw_go = "Go to nearest door & open", hw_need = "No door yet (enable Door Locator)",
+        sc_lag_fx = "Disable Effects", sc_lag_shadow = "Disable Shadows", sc_lag_post = "Disable Post FX", sc_lag_mat = "Light Materials",
+        sc_lag_quality = "Lowest Graphics", sc_lag_water = "Less Water & Grass", sc_lag_fps = "Unlock FPS",
+        lag_hint = "Only lowers graphics on your device, others are not affected. Turning an option off restores it.",
+        ld_ui = "Loading interface...", ld_settings = "Reading settings...", ld_features = "Loading features...", ld_theme = "Applying theme...", ld_ready = "Ready!",
+        isl_on = "ON", isl_off = "OFF", isl_open = "Open menu", isl_hide = "Hide menu", isl_active = "active", isl_none = "No feature enabled",
+        st_island = "Dynamic Island (top pill)",
+        lag_all = "Enable all", lag_none = "Disable / restore all",
+        ms_afk = "Anti AFK", ms_reset = "Reset character", ms_off = "Turn off all", ms_close = "Unload menu",
+        st_lang = "Language", st_color = "Menu color", st_hue = "Custom color (drag bar)",
+        st_keys = "Hotkey: RightShift = show / hide menu",
+        st_keys_touch = "Tap the round button to show / hide the menu (drag it to move)",
+        lang_vi = "Tiếng Việt", lang_en = "English",
+    },
+}
+
+local function T(key)
+    return (Lang[Settings.lang] and Lang[Settings.lang][key]) or Lang.vi[key] or key
+end
+
+local LangUpdaters = {}
+
+local function applyLang()
+    for _, fn in ipairs(LangUpdaters) do pcall(fn) end
+end
+
+local function loc(inst, key)
+    inst.Text = T(key)
+    table.insert(LangUpdaters, function() inst.Text = T(key) end)
+end
+
+-- bỏ dấu tiếng Việt để tìm kiếm "tang hinh" vẫn ra "Tàng Hình"
+local VN_MAP = {}
+for ascii, chars in pairs({
+    a = "àáạảãâầấậẩẫăằắặẳẵÀÁẠẢÃÂẦẤẬẨẪĂẰẮẶẲẴ",
+    e = "èéẹẻẽêềếệểễÈÉẸẺẼÊỀẾỆỂỄ",
+    i = "ìíịỉĩÌÍỊỈĨ",
+    o = "òóọỏõôồốộổỗơờớợởỡÒÓỌỎÕÔỒỐỘỔỖƠỜỚỢỞỠ",
+    u = "ùúụủũưừứựửữÙÚỤỦŨƯỪỨỰỬỮ",
+    y = "ỳýỵỷỹỲÝỴỶỸ",
+    d = "đĐ",
+}) do
+    for _, cp in utf8.codes(chars) do VN_MAP[cp] = ascii end
+end
+
+local function fold(s)
+    local out = {}
+    local ok = pcall(function()
+        for _, cp in utf8.codes(s) do
+            table.insert(out, VN_MAP[cp] or utf8.char(cp))
+        end
+    end)
+    if not ok then return s:lower() end
+    return table.concat(out):lower()
+end
+
+----------------------------------------------------------------
+-- HELPERS UI
+----------------------------------------------------------------
+local function tween(o, props, t)
+    if IS_TOUCH then return end
+    TweenService:Create(o, TweenInfo.new(t or 0.15), props):Play()
+end
+
+local function corner(inst, radius)
+    local c = Instance.new("UICorner")
+    c.CornerRadius = UDim.new(0, radius or 10)
+    c.Parent = inst
+    return c
+end
+
+local function stroke(inst, key, thickness, transparency)
+    local s = Instance.new("UIStroke")
+    s.Thickness = thickness or 1
+    s.Transparency = transparency == nil and 0.35 or transparency
+    s.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    themed(s, "Color", key or "Accent")
+    s.Parent = inst
+    return s
+end
+
+local Orders = {}
+local function place(inst, parent)
+    Orders[parent] = (Orders[parent] or 0) + 1
+    inst.LayoutOrder = Orders[parent]
+end
+
+local function newLabel(parent, size, colorKey, xAlign)
+    local l = Instance.new("TextLabel")
+    l.BackgroundTransparency = 1
+    l.Font = Enum.Font.GothamBold
+    l.TextSize = size
+    l.TextXAlignment = xAlign or Enum.TextXAlignment.Left
+    themed(l, "TextColor3", colorKey or "Text")
+    l.Parent = parent
+    return l
+end
+
+----------------------------------------------------------------
+-- ROOT
+----------------------------------------------------------------
+pcall(function() local o = PlayerGui:FindFirstChild("BomDevHub") if o then o:Destroy() end end)
+pcall(function() local o = game:GetService("CoreGui"):FindFirstChild("BomDevHub") if o then o:Destroy() end end)
+pcall(function() if gethui then local o = gethui():FindFirstChild("BomDevHub") if o then o:Destroy() end end end)
+
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "BomDevHub"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.IgnoreGuiInset = true
+ScreenGui.DisplayOrder = 999
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+pcall(function() ScreenGui.ScreenInsets = Enum.ScreenInsets.DeviceSafeInsets end) -- tránh tai thỏ / thanh home iPhone
+
+local parented = pcall(function()
+    ScreenGui.Parent = (gethui and gethui()) or game:GetService("CoreGui")
+end)
+if not parented or not ScreenGui.Parent then
+    ScreenGui.Parent = PlayerGui
+end
+
+local Wrapper = Instance.new("Frame")
+Wrapper.Name = "Wrapper"
+Wrapper.AnchorPoint = Vector2.new(0.5, 0.5)
+Wrapper.Position = UDim2.fromScale(0.5, 0.5)
+Wrapper.Size = UDim2.fromOffset(DESIGN_W + SHADOW_PAD * 2, DESIGN_H + SHADOW_PAD * 2)
+Wrapper.BackgroundTransparency = 1
+Wrapper.Parent = ScreenGui
+
+local UIScaleNode = Instance.new("UIScale")
+UIScaleNode.Parent = Wrapper
+
+local function targetScale()
+    local vp = ScreenGui.AbsoluteSize
+    if vp.X < 10 or vp.Y < 10 then
+        vp = (workspace.CurrentCamera or Camera).ViewportSize
+    end
+    local margin = 20
+    local scale = math.min((vp.X - margin * 2) / DESIGN_W, (vp.Y - margin * 2) / DESIGN_H, MAX_SCALE)
+    return math.clamp(scale, MIN_SCALE, MAX_SCALE)
+end
+
+local function fitToScreen()
+    if MenuAnimating then return end
+    UIScaleNode.Scale = targetScale()
+end
+fitToScreen()
+ScreenGui:GetPropertyChangedSignal("AbsoluteSize"):Connect(fitToScreen)
+if Camera then
+    Camera:GetPropertyChangedSignal("ViewportSize"):Connect(fitToScreen)
+end
+
+for _, spec in ipairs({
+    {pad = 10, dy = 4,  trans = 0.55, radius = 20},
+    {pad = 24, dy = 9,  trans = 0.72, radius = 26},
+    {pad = 42, dy = 15, trans = 0.85, radius = 34},
+}) do
+    local layer = Instance.new("Frame")
+    layer.AnchorPoint = Vector2.new(0.5, 0.5)
+    layer.Position = UDim2.new(0.5, 0, 0.5, spec.dy)
+    layer.Size = UDim2.fromOffset(DESIGN_W + spec.pad, DESIGN_H + spec.pad)
+    layer.BackgroundColor3 = Color3.new(0, 0, 0)
+    layer.BackgroundTransparency = spec.trans
+    layer.BorderSizePixel = 0
+    layer.ZIndex = 1
+    layer.Parent = Wrapper
+    corner(layer, spec.radius)
+    table.insert(ShadowLayers, {layer, spec.trans})
+end
+
+local Main = Instance.new("CanvasGroup")
+Main.Name = "Main"
+Main.AnchorPoint = Vector2.new(0.5, 0.5)
+Main.Position = UDim2.fromScale(0.5, 0.5)
+Main.Size = UDim2.fromOffset(DESIGN_W, DESIGN_H)
+Main.BorderSizePixel = 0
+Main.ClipsDescendants = true
+Main.Active = true -- chặn cảm ứng để chạm/kéo trên menu không xoay camera game
+Main.ZIndex = 2
+themed(Main, "BackgroundColor3", "Panel")
+Main.Parent = Wrapper
+corner(Main, 16)
+stroke(Main, "Accent", 1, 0.5)
+
+local Pad = Instance.new("UIPadding")
+Pad.PaddingTop = UDim.new(0, 14)
+Pad.PaddingBottom = UDim.new(0, 14)
+Pad.PaddingLeft = UDim.new(0, 14)
+Pad.PaddingRight = UDim.new(0, 14)
+Pad.Parent = Main
+
+local MenuLocked = false -- khóa bật/tắt menu trong lúc chạy màn hình load
+local menuTok = 0
+local function setMenuVisible(state)
+    if MenuLocked then return end
+    menuTok += 1
+    local my = menuTok
+    local base = targetScale()
+    MenuAnimating = true
+
+    if state then
+        -- BẬT: phóng từ nhỏ lên + hiện dần, nảy nhẹ
+        if not Wrapper.Visible then
+            UIScaleNode.Scale = base * 0.88
+            Main.GroupTransparency = 1
+            for _, e in ipairs(ShadowLayers) do e[1].BackgroundTransparency = 1 end
+            Wrapper.Visible = true
+        end
+        TweenService:Create(UIScaleNode, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = base}):Play()
+        TweenService:Create(Main, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {GroupTransparency = 0}):Play()
+        for _, e in ipairs(ShadowLayers) do
+            TweenService:Create(e[1], TweenInfo.new(0.4, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {BackgroundTransparency = e[2]}):Play()
+        end
+        task.delay(0.55, function()
+            if menuTok == my then
+                MenuAnimating = false
+                UIScaleNode.Scale = targetScale()
+            end
+        end)
+    else
+        -- TẮT: thu nhỏ nhẹ + mờ dần rồi ẩn
+        if not Wrapper.Visible then MenuAnimating = false return end
+        TweenService:Create(UIScaleNode, TweenInfo.new(0.22, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Scale = base * 0.9}):Play()
+        TweenService:Create(Main, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {GroupTransparency = 1}):Play()
+        for _, e in ipairs(ShadowLayers) do
+            TweenService:Create(e[1], TweenInfo.new(0.2), {BackgroundTransparency = 1}):Play()
+        end
+        task.delay(0.24, function()
+            if menuTok ~= my then return end
+            Wrapper.Visible = false
+            -- trả lại trạng thái gốc để lần mở sau sạch
+            Main.GroupTransparency = 0
+            for _, e in ipairs(ShadowLayers) do e[1].BackgroundTransparency = e[2] end
+            MenuAnimating = false
+            UIScaleNode.Scale = targetScale()
+        end)
+    end
+end
+
+----------------------------------------------------------------
+-- DRAG
+----------------------------------------------------------------
+local DragConns = {}
+
+-- kéo bằng chuột hoặc ngón tay. theo dõi input toàn cục nên kéo nhanh vẫn không bị rơi.
+local function makeDraggable(handle, target)
+    local dragInput, dragStart, startPos
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+            dragStart = input.Position
+            startPos = target.Position
+        end
+    end)
+    table.insert(DragConns, UserInputService.InputChanged:Connect(function(input)
+        if not dragInput then return end
+        local isMove = (dragInput.UserInputType == Enum.UserInputType.Touch and input == dragInput)
+            or (dragInput.UserInputType == Enum.UserInputType.MouseButton1
+                and input.UserInputType == Enum.UserInputType.MouseMovement)
+        if isMove then
+            local delta = input.Position - dragStart
+            target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+                                         startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end))
+    table.insert(DragConns, UserInputService.InputEnded:Connect(function(input)
+        if dragInput and (input == dragInput
+            or (dragInput.UserInputType == Enum.UserInputType.MouseButton1
+                and input.UserInputType == Enum.UserInputType.MouseButton1)) then
+            dragInput = nil
+        end
+    end))
+end
+
+----------------------------------------------------------------
+-- TOP BAR (logo = avatar người chơi)
+----------------------------------------------------------------
+local TopBar = Instance.new("Frame")
+TopBar.Size = UDim2.new(1, 0, 0, 64)
+TopBar.BorderSizePixel = 0
+themed(TopBar, "BackgroundColor3", "Card")
+TopBar.Parent = Main
+corner(TopBar, 14)
+stroke(TopBar)
+makeDraggable(TopBar, Wrapper)
+
+local LogoFrame = Instance.new("Frame")
+LogoFrame.Size = UDim2.fromOffset(42, 42)
+LogoFrame.Position = UDim2.fromOffset(12, 11)
+LogoFrame.BorderSizePixel = 0
+themed(LogoFrame, "BackgroundColor3", "Panel")
+LogoFrame.Parent = TopBar
+corner(LogoFrame, 21)
+stroke(LogoFrame, "Accent", 2, 0)
+
+local Diamond = Instance.new("Frame") -- hiện tạm trong lúc avatar đang tải
+Diamond.AnchorPoint = Vector2.new(0.5, 0.5)
+Diamond.Position = UDim2.fromScale(0.5, 0.5)
+Diamond.Size = UDim2.fromOffset(16, 16)
+Diamond.Rotation = 45
+Diamond.BorderSizePixel = 0
+themed(Diamond, "BackgroundColor3", "Accent")
+Diamond.Parent = LogoFrame
+corner(Diamond, 4)
+
+local Avatar = Instance.new("ImageLabel")
+Avatar.Name = "Avatar"
+Avatar.Size = UDim2.fromScale(1, 1)
+Avatar.BackgroundTransparency = 1
+Avatar.Image = ""
+Avatar.ZIndex = 3
+Avatar.Parent = LogoFrame
+corner(Avatar, 21)
+
+task.spawn(function()
+    for _ = 1, 5 do
+        local ok, content, ready = pcall(function()
+            return Players:GetUserThumbnailAsync(
+                LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+        end)
+        if ok and content and content ~= "" then
+            Avatar.Image = content
+            Diamond.Visible = false
+            if ready ~= false then break end
+        end
+        task.wait(1)
+    end
+end)
+
+local buildRoleBadge
+do
+local TitleRow = Instance.new("Frame")
+TitleRow.Position = UDim2.fromOffset(64, 10)
+TitleRow.Size = UDim2.fromOffset(300, 24)
+TitleRow.BackgroundTransparency = 1
+TitleRow.Parent = TopBar
+local TitleLayout = Instance.new("UIListLayout")
+TitleLayout.FillDirection = Enum.FillDirection.Horizontal
+TitleLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+TitleLayout.Padding = UDim.new(0, 8)
+TitleLayout.SortOrder = Enum.SortOrder.LayoutOrder
+TitleLayout.Parent = TitleRow
+
+local Title = newLabel(TitleRow, 19, "Text")
+Title.AutomaticSize = Enum.AutomaticSize.X
+Title.Size = UDim2.fromOffset(0, 22)
+Title.LayoutOrder = 1
+Title.Text = "Dom2dev Hub"
+
+-- huy hiệu chức danh: ADMIN (vàng, viền ánh sáng quay) / MEMBER (màu theme)
+local function makeRoleBadge(parent, order)
+    local admin = (ROLE == "admin")
+    local gold = rgb(255, 196, 60)
+
+    local b = Instance.new("Frame")
+    b.Name = "RoleBadge"
+    b.AutomaticSize = Enum.AutomaticSize.X
+    b.Size = UDim2.fromOffset(0, 18)
+    b.BorderSizePixel = 0
+    b.LayoutOrder = order or 2
+    corner(b, 9)
+
+    local pad = Instance.new("UIPadding")
+    pad.PaddingLeft = UDim.new(0, 9)
+    pad.PaddingRight = UDim.new(0, 9)
+    pad.Parent = b
+
+    local l = newLabel(b, 10, admin and "Text" or "Accent", Enum.TextXAlignment.Center)
+    l.AutomaticSize = Enum.AutomaticSize.X
+    l.Size = UDim2.fromOffset(0, 18)
+    loc(l, admin and "role_admin" or "role_member")
+
+    if admin then
+        b.BackgroundColor3 = rgb(48, 36, 8)
+        l.TextColor3 = gold
+        -- không dùng themed cho chữ vàng: gỡ khỏi bảng theme
+        for i = #Themed, 1, -1 do
+            if Themed[i][1] == l then table.remove(Themed, i) end
+        end
+        local st = Instance.new("UIStroke")
+        st.Thickness = 1.5
+        st.Color = Color3.new(1, 1, 1)
+        st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        st.Parent = b
+        local gr = Instance.new("UIGradient")
+        gr.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, gold),
+            ColorSequenceKeypoint.new(0.5, rgb(255, 245, 200)),
+            ColorSequenceKeypoint.new(1, gold),
+        })
+        gr.Parent = st
+        TweenService:Create(gr, TweenInfo.new(2.4, Enum.EasingStyle.Linear, Enum.EasingDirection.In, -1),
+            {Rotation = 360}):Play()
+    else
+        themed(b, "BackgroundColor3", "Panel")
+        stroke(b, "Accent", 1, 0.45)
+    end
+    b.Parent = parent
+    return b
+end
+local RoleBadge
+buildRoleBadge = function()
+    if RoleBadge then RoleBadge:Destroy() end
+    RoleBadge = makeRoleBadge(TitleRow, 2)
+end
+buildRoleBadge()
+end
+
+local SubTitle = newLabel(TopBar, 10, "SubText")
+SubTitle.Position = UDim2.fromOffset(64, 34)
+SubTitle.Size = UDim2.fromOffset(280, 16)
+SubTitle.Text = "S C R I P T   D O M 2 D E V"
+
+local SearchBox = Instance.new("TextBox")
+SearchBox.Text = ""
+SearchBox.ClearTextOnFocus = false
+SearchBox.Font = Enum.Font.Gotham
+SearchBox.TextSize = 14
+SearchBox.TextColor3 = Theme.Text
+SearchBox.PlaceholderColor3 = Theme.SubText
+SearchBox.Size = UDim2.fromOffset(230, 36)
+SearchBox.Position = UDim2.new(1, -282, 0, 14)
+themed(SearchBox, "BackgroundColor3", "Panel")
+SearchBox.Parent = TopBar
+corner(SearchBox, 18)
+stroke(SearchBox)
+local SearchPad = Instance.new("UIPadding")
+SearchPad.PaddingLeft = UDim.new(0, 16)
+SearchPad.Parent = SearchBox
+table.insert(LangUpdaters, function() SearchBox.PlaceholderText = T("search") end)
+
+local CloseBtn = Instance.new("TextButton")
+CloseBtn.Text = "×"
+CloseBtn.Font = Enum.Font.GothamBold
+CloseBtn.TextSize = 20
+CloseBtn.TextColor3 = Theme.SubText
+CloseBtn.AutoButtonColor = false
+CloseBtn.Size = UDim2.fromOffset(36, 36)
+CloseBtn.Position = UDim2.new(1, -42, 0, 14)
+themed(CloseBtn, "BackgroundColor3", "Panel")
+CloseBtn.Parent = TopBar
+corner(CloseBtn, 18)
+stroke(CloseBtn)
+CloseBtn.MouseEnter:Connect(function() tween(CloseBtn, {TextColor3 = rgb(255, 110, 110)}) end)
+CloseBtn.MouseLeave:Connect(function() tween(CloseBtn, {TextColor3 = Theme.SubText}) end)
+CloseBtn.MouseButton1Click:Connect(function() setMenuVisible(false) end)
+
+----------------------------------------------------------------
+-- BODY + SIDEBAR (chuyển tab)
+----------------------------------------------------------------
+local Body = Instance.new("Frame")
+Body.Size = UDim2.new(1, 0, 1, -78)
+Body.Position = UDim2.fromOffset(0, 78)
+Body.BackgroundTransparency = 1
+Body.Parent = Main
+
+local Sidebar = Instance.new("Frame")
+Sidebar.Size = UDim2.new(0, 172, 1, 0)
+Sidebar.BorderSizePixel = 0
+themed(Sidebar, "BackgroundColor3", "Card")
+Sidebar.Parent = Body
+corner(Sidebar, 14)
+stroke(Sidebar)
+
+local SideLabel = newLabel(Sidebar, 13, "SubText")
+SideLabel.Position = UDim2.fromOffset(18, 14)
+SideLabel.Size = UDim2.new(1, -36, 0, 18)
+loc(SideLabel, "menu_label")
+
+local SideList = Instance.new("ScrollingFrame")
+SideList.Position = UDim2.fromOffset(14, 44)
+SideList.Size = UDim2.new(1, -28, 1, -58)
+SideList.BackgroundTransparency = 1
+SideList.BorderSizePixel = 0
+SideList.ScrollBarThickness = 0
+SideList.CanvasSize = UDim2.new()
+SideList.AutomaticCanvasSize = Enum.AutomaticSize.Y
+SideList.Parent = Sidebar
+
+local SideLayout = Instance.new("UIListLayout")
+SideLayout.Padding = UDim.new(0, 3)
+SideLayout.SortOrder = Enum.SortOrder.LayoutOrder
+SideLayout.Parent = SideList
+
+local Pages = {}
+local currentTab = "scripts"
+local TabButtons, TabBars = {}, {}
+local setTab
+
+local function refreshTabs()
+    for id, b in pairs(TabButtons) do
+        local active = (id == currentTab)
+        b.BackgroundColor3 = active and Theme.CardHi or Theme.Panel
+        TabBars[id].BackgroundTransparency = active and 0 or 1
+    end
+end
+table.insert(ThemeUpdaters, refreshTabs)
+
+local function navButton(id)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, 0, 0, 28)
+    b.BorderSizePixel = 0
+    b.Text = ""
+    b.AutoButtonColor = false
+    themed(b, "BackgroundColor3", "Panel")
+    place(b, SideList)
+    b.Parent = SideList
+    corner(b, 11)
+
+    local bar = Instance.new("Frame")
+    bar.Size = UDim2.new(0, 5, 1, -16)
+    bar.Position = UDim2.fromOffset(0, 8)
+    bar.BorderSizePixel = 0
+    bar.ZIndex = 2
+    themed(bar, "BackgroundColor3", "Accent")
+    bar.Parent = b
+    corner(bar, 3)
+
+    local label = newLabel(b, 14, "Text")
+    label.Position = UDim2.fromOffset(22, 0)
+    label.Size = UDim2.new(1, -30, 1, 0)
+    label.ZIndex = 2
+    loc(label, "nav_" .. id)
+
+    b.MouseEnter:Connect(function()
+        if currentTab ~= id then tween(b, {BackgroundColor3 = Theme.CardHi}) end
+    end)
+    b.MouseLeave:Connect(function()
+        tween(b, {BackgroundColor3 = (currentTab == id) and Theme.CardHi or Theme.Panel})
+    end)
+    b.MouseButton1Click:Connect(function() setTab(id) end)
+
+    TabButtons[id], TabBars[id] = b, bar
+    return b
+end
+
+navButton("scripts")
+navButton("server")
+navButton("chat")
+navButton("fake")
+navButton("lag")
+navButton("halloween")
+navButton("misc")
+navButton("find")
+navButton("settings")
+
+-- tab Fake Admin: chỉ hiện khi chọn danh hiệu ADMIN
+local FakeAdminNav = navButton("fakeadmin")
+FakeAdminNav.Visible = false
+local function refreshAdminNav()
+    FakeAdminNav.Visible = (ROLE == "admin")
+    if ROLE ~= "admin" and currentTab == "fakeadmin" then setTab("scripts") end
+end
+
+----------------------------------------------------------------
+-- LIST PANEL + PAGES
+----------------------------------------------------------------
+local ListPanel = Instance.new("Frame")
+ListPanel.Size = UDim2.new(1, -186, 1, 0)
+ListPanel.Position = UDim2.fromOffset(186, 0)
+ListPanel.BorderSizePixel = 0
+themed(ListPanel, "BackgroundColor3", "Card")
+ListPanel.Parent = Body
+corner(ListPanel, 14)
+stroke(ListPanel)
+
+local ListTitle = newLabel(ListPanel, 14, "Text")
+ListTitle.Position = UDim2.fromOffset(20, 15)
+ListTitle.Size = UDim2.fromOffset(300, 18)
+table.insert(LangUpdaters, function() ListTitle.Text = T("title_" .. currentTab) end)
+
+local function newPage(id, grid)
+    local sf = Instance.new("ScrollingFrame")
+    sf.Position = UDim2.fromOffset(20, 46)
+    sf.Size = UDim2.new(1, -40, 1, -62)
+    sf.BackgroundTransparency = 1
+    sf.BorderSizePixel = 0
+    sf.ScrollBarThickness = 4
+    sf.CanvasSize = UDim2.new(0, 0, 0, 0)
+    sf.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    sf.Visible = false
+    themed(sf, "ScrollBarImageColor3", "Accent")
+    sf.Parent = ListPanel
+
+    if grid then
+        local g = Instance.new("UIGridLayout")
+        g.CellSize = UDim2.new(0.5, -9, 0, 48)
+        g.CellPadding = UDim2.fromOffset(14, 12)
+        g.SortOrder = Enum.SortOrder.LayoutOrder
+        g.Parent = sf
+    else
+        local l = Instance.new("UIListLayout")
+        l.Padding = UDim.new(0, 10)
+        l.SortOrder = Enum.SortOrder.LayoutOrder
+        l.Parent = sf
+    end
+    Pages[id] = sf
+    return sf
+end
+
+local PageScripts  = newPage("scripts", true)
+local PageServer   = newPage("server", false)
+local PageMisc     = newPage("misc", false)
+local PageLag      = newPage("lag", false)
+local PageHalloween = newPage("halloween", false)
+local PageSettings = newPage("settings", false)
+local PageFakeAdmin = newPage("fakeadmin", false)
+
+----------------------------------------------------------------
+-- TAB CHAT SERVER (chat trong server hiện tại, dùng chat gốc của game)
+----------------------------------------------------------------
+local ChatApi = {} -- cho tab Fake Chat đẩy tin vào danh sách chat
+local PageChat = Instance.new("Frame")
+PageChat.Position = UDim2.fromOffset(20, 46)
+PageChat.Size = UDim2.new(1, -40, 1, -62)
+PageChat.BackgroundTransparency = 1
+PageChat.Visible = false
+PageChat.Parent = ListPanel
+Pages.chat = PageChat
+
+do
+    -- chat trong server này: đọc + gửi qua chat gốc của game (TextChatService hoặc chat cũ), không cần server ngoài
+    local TextChatService = game:GetService("TextChatService")
+    local ReplicatedStorage = game:GetService("ReplicatedStorage")
+    local MAX_LEN, COOLDOWN, MAX_ROWS = 200, 1, 100
+    local useNew = TextChatService.ChatVersion == Enum.ChatVersion.TextChatService
+    local chatConns = {}
+
+    local statusKey = "chat_online"
+    local statusLbl = newLabel(PageChat, 11, "SubText")
+    statusLbl.Font = Enum.Font.Gotham
+    statusLbl.Size = UDim2.new(1, 0, 0, 16)
+    statusLbl.Text = T(statusKey)
+    local function setStatus(k)
+        statusKey = k
+        statusLbl.Text = T(k)
+    end
+    table.insert(LangUpdaters, function() statusLbl.Text = T(statusKey) end)
+
+    local msgScroll = Instance.new("ScrollingFrame")
+    msgScroll.Position = UDim2.fromOffset(0, 22)
+    msgScroll.Size = UDim2.new(1, 0, 1, -68)
+    msgScroll.BackgroundTransparency = 1
+    msgScroll.BorderSizePixel = 0
+    msgScroll.ScrollBarThickness = 4
+    msgScroll.CanvasSize = UDim2.new()
+    msgScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    themed(msgScroll, "ScrollBarImageColor3", "Accent")
+    msgScroll.Parent = PageChat
+    local ml = Instance.new("UIListLayout")
+    ml.Padding = UDim.new(0, 6)
+    ml.SortOrder = Enum.SortOrder.LayoutOrder
+    ml.Parent = msgScroll
+
+    -- ô nhập + nút gửi
+    local inputRow = Instance.new("Frame")
+    inputRow.Position = UDim2.new(0, 0, 1, -38)
+    inputRow.Size = UDim2.new(1, 0, 0, 38)
+    inputRow.BackgroundTransparency = 1
+    inputRow.Parent = PageChat
+
+    local box = Instance.new("TextBox")
+    box.Size = UDim2.new(1, -84, 1, 0)
+    box.Text = ""
+    box.ClearTextOnFocus = false
+    box.Font = Enum.Font.Gotham
+    box.TextSize = 13
+    box.TextXAlignment = Enum.TextXAlignment.Left
+    box.TextColor3 = Theme.Text
+    box.PlaceholderColor3 = Theme.SubText
+    box.ClipsDescendants = true
+    box.BorderSizePixel = 0
+    themed(box, "BackgroundColor3", "Panel")
+    box.Parent = inputRow
+    corner(box, 12)
+    stroke(box)
+    local bp = Instance.new("UIPadding")
+    bp.PaddingLeft = UDim.new(0, 12)
+    bp.PaddingRight = UDim.new(0, 12)
+    bp.Parent = box
+    table.insert(LangUpdaters, function() box.PlaceholderText = T("chat_ph") end)
+
+    local sendBtn = Instance.new("TextButton")
+    sendBtn.Position = UDim2.new(1, -76, 0, 0)
+    sendBtn.Size = UDim2.fromOffset(76, 38)
+    sendBtn.Font = Enum.Font.GothamBold
+    sendBtn.TextSize = 13
+    sendBtn.TextColor3 = Color3.new(0, 0, 0)
+    sendBtn.AutoButtonColor = false
+    sendBtn.BorderSizePixel = 0
+    themed(sendBtn, "BackgroundColor3", "Accent")
+    sendBtn.Parent = inputRow
+    corner(sendBtn, 12)
+    loc(sendBtn, "chat_send")
+
+    ----------------------------------------------------------
+    -- hiển thị tin nhắn
+    ----------------------------------------------------------
+    local rows, lastSend = {}, 0
+
+    local function esc(s)
+        return (tostring(s):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;")
+            :gsub('"', "&quot;"):gsub("'", "&apos;"))
+    end
+
+    -- TextChatService có thể trả text đã escape sẵn: gỡ trước rồi escape lại để không bị đúp
+    local function unesc(s)
+        return (tostring(s):gsub("&lt;", "<"):gsub("&gt;", ">"):gsub("&quot;", '"')
+            :gsub("&apos;", "'"):gsub("&amp;", "&"))
+    end
+
+    local function clip(s, n)
+        s = tostring(s or "")
+        if (utf8.len(s) or #s) > n then
+            s = s:sub(1, (utf8.offset(s, n + 1) or (#s + 1)) - 1)
+        end
+        return s
+    end
+
+    local function addMessage(name, userId, text)
+        local nearBottom = msgScroll.CanvasPosition.Y + msgScroll.AbsoluteWindowSize.Y
+            >= msgScroll.AbsoluteCanvasSize.Y - 40
+
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, -10, 0, 0)
+        row.AutomaticSize = Enum.AutomaticSize.Y
+        row.BorderSizePixel = 0
+        themed(row, "BackgroundColor3", "Panel")
+        place(row, msgScroll)
+        row.Parent = msgScroll
+        corner(row, 10)
+        local rp = Instance.new("UIPadding")
+        rp.PaddingTop, rp.PaddingBottom = UDim.new(0, 7), UDim.new(0, 7)
+        rp.PaddingLeft, rp.PaddingRight = UDim.new(0, 12), UDim.new(0, 12)
+        rp.Parent = row
+
+        local mine = (userId == LocalPlayer.UserId)
+        local col = (mine and Theme.Good or Theme.Accent):ToHex()
+        local lb = Instance.new("TextLabel")
+        lb.BackgroundTransparency = 1
+        lb.AutomaticSize = Enum.AutomaticSize.Y
+        lb.Size = UDim2.new(1, 0, 0, 0)
+        lb.Font = Enum.Font.Gotham
+        lb.TextSize = 13
+        lb.TextWrapped = true
+        lb.RichText = true
+        lb.TextXAlignment = Enum.TextXAlignment.Left
+        lb.TextYAlignment = Enum.TextYAlignment.Top
+        lb.TextColor3 = Theme.Text
+        lb.Text = string.format('<font color="#%s"><b>%s</b></font>  %s',
+            col, esc(clip(name, 32)), esc(clip(unesc(text), MAX_LEN)))
+        lb.Parent = row
+
+        table.insert(rows, row)
+        if #rows > MAX_ROWS then table.remove(rows, 1):Destroy() end
+
+        if nearBottom or mine then
+            task.defer(function()
+                msgScroll.CanvasPosition = Vector2.new(0, msgScroll.AbsoluteCanvasSize.Y)
+            end)
+        end
+    end
+
+    ChatApi.add = addMessage
+
+    ----------------------------------------------------------
+    -- nhận tin nhắn của người chơi trong server này
+    ----------------------------------------------------------
+    if useNew then
+        table.insert(chatConns, TextChatService.MessageReceived:Connect(function(m)
+            local src = m.TextSource
+            if not src then return end -- bỏ tin hệ thống
+            local plr = Players:GetPlayerByUserId(src.UserId)
+            addMessage(plr and plr.DisplayName or src.Name, src.UserId, m.Text)
+        end))
+    else
+        local hooked = {}
+        local function hook(p)
+            if hooked[p] then return end
+            hooked[p] = true
+            table.insert(chatConns, p.Chatted:Connect(function(msg)
+                addMessage(p.DisplayName, p.UserId, msg)
+            end))
+        end
+        for _, p in ipairs(Players:GetPlayers()) do hook(p) end
+        table.insert(chatConns, Players.PlayerAdded:Connect(hook))
+    end
+
+    ScreenGui.Destroying:Connect(function()
+        for _, c in ipairs(chatConns) do c:Disconnect() end
+    end)
+
+    ----------------------------------------------------------
+    -- gửi tin nhắn (qua chat gốc của game)
+    ----------------------------------------------------------
+    local function send()
+        local txt = clip(box.Text:match("^%s*(.-)%s*$") or "", MAX_LEN)
+        if txt == "" then return end
+        if os.clock() - lastSend < COOLDOWN then
+            setStatus("chat_cooldown")
+            task.delay(1.5, function() setStatus("chat_online") end)
+            return
+        end
+
+        local ok = false
+        if useNew then
+            local channels = TextChatService:FindFirstChild("TextChannels")
+            local ch = channels and channels:FindFirstChild("RBXGeneral")
+            if ch then ok = pcall(function() ch:SendAsync(txt) end) end
+        else
+            local ev = ReplicatedStorage:FindFirstChild("DefaultChatSystemChatEvents")
+            local say = ev and ev:FindFirstChild("SayMessageRequest")
+            if say then ok = pcall(function() say:FireServer(txt, "All") end) end
+        end
+
+        if ok then
+            lastSend = os.clock()
+            box.Text = ""
+            setStatus("chat_online")
+        else
+            setStatus("chat_nochannel")
+            task.delay(2, function() setStatus("chat_online") end)
+        end
+    end
+
+    sendBtn.MouseButton1Click:Connect(send)
+    box.FocusLost:Connect(function(enter) if enter then send() end end)
+end
+
+setTab = function(id)
+    if id == "fakeadmin" and ROLE ~= "admin" then return end
+    if id == "find" then
+        id = "scripts"
+        task.defer(function() SearchBox:CaptureFocus() end)
+    end
+    currentTab = id
+    for pid, page in pairs(Pages) do page.Visible = (pid == id) end
+    refreshTabs()
+    applyLang() -- cập nhật tiêu đề
+end
+
+-- card = nút/ô chung (hover, viền, màu theme)
+local function card(parent, height)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -10, 0, height or 46)
+    b.AutoButtonColor = false
+    b.BorderSizePixel = 0
+    b.Text = ""
+    themed(b, "BackgroundColor3", "Panel")
+    place(b, parent)
+    b.Parent = parent
+    corner(b, 11)
+    stroke(b)
+    b.MouseEnter:Connect(function() tween(b, {BackgroundColor3 = Theme.CardHi}) end)
+    b.MouseLeave:Connect(function()
+        tween(b, {BackgroundColor3 = b:GetAttribute("Active") and Theme.CardHi or Theme.Panel})
+    end)
+    return b
+end
+
+local function actionButton(parent, key, onClick)
+    local b = card(parent)
+    local l = newLabel(b, 14, "Text", Enum.TextXAlignment.Center)
+    l.Size = UDim2.fromScale(1, 1)
+    l.ZIndex = 2
+    loc(l, key)
+    b.MouseButton1Click:Connect(function() onClick(l, key) end)
+    return b, l
+end
+
+local function flash(label, key, msgKey)
+    label.Text = T(msgKey)
+    task.delay(1.6, function()
+        if label.Parent then label.Text = T(key) end
+    end)
+end
+
+local function sectionLabel(parent, key)
+    local l = newLabel(parent, 12, "SubText")
+    l.Size = UDim2.new(1, -10, 0, 18)
+    place(l, parent)
+    loc(l, key)
+    return l
+end
+
+local function infoRow(parent, key)
+    local f = Instance.new("Frame")
+    f.Size = UDim2.new(1, -10, 0, 38)
+    f.BorderSizePixel = 0
+    themed(f, "BackgroundColor3", "Panel")
+    place(f, parent)
+    f.Parent = parent
+    corner(f, 11)
+    stroke(f, "Accent", 1, 0.6)
+
+    local k = newLabel(f, 13, "SubText")
+    k.Position = UDim2.fromOffset(16, 0)
+    k.Size = UDim2.new(0.4, -16, 1, 0)
+    loc(k, key)
+
+    local v = newLabel(f, 13, "Text", Enum.TextXAlignment.Right)
+    v.Position = UDim2.new(0.4, 0, 0, 0)
+    v.Size = UDim2.new(0.6, -16, 1, 0)
+    v.TextTruncate = Enum.TextTruncate.AtEnd
+    v.Text = "-"
+    return v
+end
+
+----------------------------------------------------------------
+-- TAB FAKE CHAT (chỉ hiện trên máy bạn, người khác không thấy)
+-- 1) ô viết chat  2) nút áp dụng  3) danh sách người chơi để chọn
+----------------------------------------------------------------
+local PageFake = Instance.new("Frame")
+PageFake.Position = UDim2.fromOffset(20, 46)
+PageFake.Size = UDim2.new(1, -40, 1, -62)
+PageFake.BackgroundTransparency = 1
+PageFake.Visible = false
+PageFake.Parent = ListPanel
+Pages.fake = PageFake
+
+do
+    local TextChatService = game:GetService("TextChatService")
+    local StarterGui = game:GetService("StarterGui")
+    local fakeConns = {}
+    local selected -- Player đang chọn
+
+    -- 1) ô viết chat
+    local fbox = Instance.new("TextBox")
+    fbox.Position = UDim2.fromOffset(0, 0)
+    fbox.Size = UDim2.new(1, 0, 0, 38)
+    fbox.Text = ""
+    fbox.ClearTextOnFocus = false
+    fbox.Font = Enum.Font.Gotham
+    fbox.TextSize = 13
+    fbox.TextXAlignment = Enum.TextXAlignment.Left
+    fbox.TextColor3 = Theme.Text
+    fbox.PlaceholderColor3 = Theme.SubText
+    fbox.ClipsDescendants = true
+    fbox.BorderSizePixel = 0
+    themed(fbox, "BackgroundColor3", "Panel")
+    fbox.Parent = PageFake
+    corner(fbox, 12)
+    stroke(fbox)
+    local fp = Instance.new("UIPadding")
+    fp.PaddingLeft = UDim.new(0, 12)
+    fp.PaddingRight = UDim.new(0, 12)
+    fp.Parent = fbox
+    table.insert(LangUpdaters, function() fbox.PlaceholderText = T("fk_ph") end)
+
+    -- 3) danh sách người chơi
+    local pickLbl = newLabel(PageFake, 12, "SubText")
+    pickLbl.Position = UDim2.fromOffset(0, 92)
+    pickLbl.Size = UDim2.new(1, 0, 0, 16)
+    loc(pickLbl, "fk_pick")
+
+    local list = Instance.new("ScrollingFrame")
+    list.Position = UDim2.fromOffset(0, 112)
+    list.Size = UDim2.new(1, 0, 1, -112)
+    list.BackgroundTransparency = 1
+    list.BorderSizePixel = 0
+    list.ScrollBarThickness = 4
+    list.CanvasSize = UDim2.new()
+    list.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    themed(list, "ScrollBarImageColor3", "Accent")
+    list.Parent = PageFake
+    local ll = Instance.new("UIListLayout")
+    ll.Padding = UDim.new(0, 6)
+    ll.SortOrder = Enum.SortOrder.LayoutOrder
+    ll.Parent = list
+
+    local rows = {} -- {btn, plr}
+    local function paintRows()
+        for _, r in ipairs(rows) do
+            if r.btn.Parent then
+                r.btn.BackgroundColor3 = (selected == r.plr) and Theme.CardHi or Theme.Panel
+            end
+        end
+    end
+    table.insert(ThemeUpdaters, paintRows)
+
+    local function rebuild()
+        for _, r in ipairs(rows) do r.btn:Destroy() end
+        rows = {}
+        if selected and selected.Parent ~= Players then selected = nil end
+        local all = Players:GetPlayers()
+        table.sort(all, function(a, b) return a.DisplayName:lower() < b.DisplayName:lower() end)
+        for _, p in ipairs(all) do
+            local b = Instance.new("TextButton")
+            b.Size = UDim2.new(1, -10, 0, 34)
+            b.Text = ""
+            b.AutoButtonColor = false
+            b.BorderSizePixel = 0
+            themed(b, "BackgroundColor3", "Panel")
+            place(b, list)
+            b.Parent = list
+            corner(b, 10)
+            stroke(b, "Accent", 1, 0.6)
+            local l = newLabel(b, 13, "Text")
+            l.Position = UDim2.fromOffset(14, 0)
+            l.Size = UDim2.new(1, -24, 1, 0)
+            l.TextTruncate = Enum.TextTruncate.AtEnd
+            l.Text = p.DisplayName .. "  (@" .. p.Name .. ")"
+            b.MouseButton1Click:Connect(function()
+                selected = p
+                paintRows()
+            end)
+            table.insert(rows, {btn = b, plr = p})
+        end
+        paintRows()
+    end
+    rebuild()
+    table.insert(fakeConns, Players.PlayerAdded:Connect(function() task.defer(rebuild) end))
+    table.insert(fakeConns, Players.PlayerRemoving:Connect(function() task.defer(rebuild) end))
+    ScreenGui.Destroying:Connect(function()
+        for _, c in ipairs(fakeConns) do c:Disconnect() end
+    end)
+
+    -- hiện thêm 1 dòng vào khung chat gốc của game (chỉ máy bạn)
+    local function esc(s)
+        return (tostring(s):gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+    end
+    local function showNative(name, text)
+        pcall(function()
+            if TextChatService.ChatVersion == Enum.ChatVersion.TextChatService then
+                local ch = TextChatService:FindFirstChild("TextChannels")
+                ch = ch and ch:FindFirstChild("RBXGeneral")
+                if ch then ch:DisplaySystemMessage("<b>[" .. esc(name) .. "]:</b> " .. esc(text)) end
+            else
+                StarterGui:SetCore("ChatMakeSystemMessage", {
+                    Text = "[" .. name .. "]: " .. text,
+                    Color = Color3.new(1, 1, 1),
+                    Font = Enum.Font.SourceSansBold,
+                    TextSize = 18,
+                })
+            end
+        end)
+    end
+
+    -- 2) nút áp dụng
+    local applyBtn, applyLbl = actionButton(PageFake, "fk_apply", function(label, key)
+        local txt = fbox.Text:match("^%s*(.-)%s*$") or ""
+        if not selected or selected.Parent ~= Players then
+            flash(label, key, "fk_nopick")
+            return
+        end
+        if txt == "" then
+            flash(label, key, "fk_notext")
+            return
+        end
+        if utf8.len(txt) and utf8.len(txt) > 200 then
+            txt = txt:sub(1, (utf8.offset(txt, 201) or (#txt + 1)) - 1)
+        end
+        if ChatApi.add then ChatApi.add(selected.DisplayName, selected.UserId, txt) end
+        showNative(selected.DisplayName, txt)
+        fbox.Text = ""
+        flash(label, key, "fk_done")
+    end)
+    applyBtn.Position = UDim2.fromOffset(0, 46)
+    applyBtn.Size = UDim2.new(1, 0, 0, 38)
+end
+
+----------------------------------------------------------------
+-- LOGIC TÍNH NĂNG (client-side)
+----------------------------------------------------------------
+local Conns, Saved = {}, {}
+
+local function bind(key, conn)
+    if Conns[key] then Conns[key]:Disconnect() end
+    Conns[key] = conn
+end
+
+local function unbind(key)
+    if Conns[key] then
+        Conns[key]:Disconnect()
+        Conns[key] = nil
+    end
+end
+
+local function getHum()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+local function getRoot()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+local function godMode(on)
+    unbind("god")
+    if not on then return end
+    bind("god", RunService.Heartbeat:Connect(function()
+        local hum = getHum()
+        if hum and hum.Health > 0 and hum.Health < hum.MaxHealth then
+            hum.Health = hum.MaxHealth
+        end
+    end))
+end
+
+-- 0 = đặc hoàn toàn, 1 = biến mất hẳn. Càng nhỏ thì bóng ma càng đậm.
+local GHOST_TRANSPARENCY = 0.4
+
+local function invisible(on)
+    local char = LocalPlayer.Character
+    if not char then return end
+    Saved.invis = Saved.invis or {}
+    for _, d in ipairs(char:GetDescendants()) do
+        if (d:IsA("BasePart") and d.Name ~= "HumanoidRootPart") or d:IsA("Decal") then
+            if on then
+                if Saved.invis[d] == nil then Saved.invis[d] = d.Transparency end
+                d.Transparency = GHOST_TRANSPARENCY
+            elseif Saved.invis[d] ~= nil then
+                d.Transparency = Saved.invis[d]
+            end
+        end
+    end
+    if not on then Saved.invis = nil end
+end
+
+local FLY_SPEED, FLY2_SPEED = 60, 70
+
+-- Bay (V1): bay thẳng theo camera
+local function fly(on)
+    unbind("fly")
+    local root, hum = getRoot(), getHum()
+    if root then
+        local bv = root:FindFirstChild("BomFlyVel")
+        local bg = root:FindFirstChild("BomFlyGyro")
+        if bv then bv:Destroy() end
+        if bg then bg:Destroy() end
+    end
+    if hum then hum.PlatformStand = false end
+    if not on then return end
+
+    bind("fly", RunService.RenderStepped:Connect(function()
+        local r, h = getRoot(), getHum()
+        local cam = workspace.CurrentCamera
+        if not r or not h or not cam then return end
+        h.PlatformStand = true
+
+        local bv = r:FindFirstChild("BomFlyVel")
+        if not bv then
+            bv = Instance.new("BodyVelocity")
+            bv.Name = "BomFlyVel"
+            bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+            bv.Velocity = Vector3.zero
+            bv.Parent = r
+        end
+        local bg = r:FindFirstChild("BomFlyGyro")
+        if not bg then
+            bg = Instance.new("BodyGyro")
+            bg.Name = "BomFlyGyro"
+            bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+            bg.P = 9e4
+            bg.Parent = r
+        end
+
+        local cf = cam.CFrame
+        local move = cf:VectorToObjectSpace(h.MoveDirection)
+        bv.Velocity = (cf.LookVector * (-move.Z) + cf.RightVector * move.X) * FLY_SPEED
+        bg.CFrame = cf
+    end))
+end
+
+-- Bay V2: gia tốc mượt, nghiêng người + nghiêng hông theo hướng bay, lơ lửng nhẹ khi đứng yên.
+local function fly2(on)
+    unbind("fly2")
+    local root, hum = getRoot(), getHum()
+    if root then
+        for _, n in ipairs({"BomFly2Vel", "BomFly2Gyro"}) do
+            local o = root:FindFirstChild(n)
+            if o then o:Destroy() end
+        end
+    end
+    if hum then hum.PlatformStand = false end
+    if not on then return end
+
+    local vel, lean, roll = Vector3.zero, 0, 0
+    bind("fly2", RunService.RenderStepped:Connect(function(dt)
+        local r, h = getRoot(), getHum()
+        local cam = workspace.CurrentCamera
+        if not r or not h or not cam then return end
+        h.PlatformStand = true
+
+        local bv = r:FindFirstChild("BomFly2Vel")
+        if not bv then
+            bv = Instance.new("BodyVelocity")
+            bv.Name = "BomFly2Vel"
+            bv.MaxForce = Vector3.new(1e9, 1e9, 1e9)
+            bv.Velocity = Vector3.zero
+            bv.Parent = r
+        end
+        local bg = r:FindFirstChild("BomFly2Gyro")
+        if not bg then
+            bg = Instance.new("BodyGyro")
+            bg.Name = "BomFly2Gyro"
+            bg.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+            bg.P = 9e4
+            bg.Parent = r
+        end
+
+        local cf = cam.CFrame
+        local move = cf:VectorToObjectSpace(h.MoveDirection)
+        local wish = cf.LookVector * (-move.Z) + cf.RightVector * move.X
+        if wish.Magnitude > 1 then wish = wish.Unit end
+        local target = wish * FLY2_SPEED
+        if wish.Magnitude < 0.05 then
+            target = Vector3.new(0, math.sin(os.clock() * 2.2) * 2.5, 0) -- lơ lửng nhẹ
+        end
+
+        local a = 1 - math.exp(-7 * dt)
+        vel = vel:Lerp(target, a)
+        bv.Velocity = vel
+
+        local rel = cf:VectorToObjectSpace(vel) / math.max(FLY2_SPEED, 1)
+        lean = lean + (math.clamp(rel.Z, -1, 1) * math.rad(50) - lean) * a
+        roll = roll + (math.clamp(-rel.X, -1, 1) * math.rad(28) - roll) * a
+        local yaw = math.atan2(-cf.LookVector.X, -cf.LookVector.Z)
+        bg.CFrame = CFrame.Angles(0, yaw, 0) * CFrame.Angles(lean, 0, roll)
+    end))
+end
+
+local SPEED_VALUE = 50
+local function speed(on)
+    unbind("speed")
+    local hum = getHum()
+    if on then
+        if hum and Saved.walk == nil then Saved.walk = hum.WalkSpeed end
+        bind("speed", RunService.Heartbeat:Connect(function()
+            local h = getHum()
+            if h then h.WalkSpeed = SPEED_VALUE end
+        end))
+    else
+        if hum and Saved.walk then hum.WalkSpeed = Saved.walk end
+        Saved.walk = nil
+    end
+end
+
+local SPEED2_VALUE = 80
+local function speed2(on)
+    unbind("speed2")
+    if not on then return end
+    local cur = Vector3.zero
+    bind("speed2", RunService.Heartbeat:Connect(function(dt)
+        local r, h = getRoot(), getHum()
+        if not r or not h then return end
+        local extra = math.max(SPEED2_VALUE - h.WalkSpeed, 0)
+        cur = cur:Lerp(h.MoveDirection * extra, math.clamp(dt * 10, 0, 1))
+        if cur.Magnitude > 0.05 then r.CFrame = r.CFrame + cur * dt end
+    end))
+end
+
+local JUMP_VALUE = 120
+local function highJump(on)
+    unbind("jump")
+    local hum = getHum()
+    if on then
+        if hum and Saved.jump == nil then Saved.jump = {hum.UseJumpPower, hum.JumpPower} end
+        bind("jump", RunService.Heartbeat:Connect(function()
+            local h = getHum()
+            if h then
+                h.UseJumpPower = true
+                h.JumpPower = JUMP_VALUE
+            end
+        end))
+    else
+        if hum and Saved.jump then
+            hum.UseJumpPower = Saved.jump[1]
+            hum.JumpPower = Saved.jump[2]
+        end
+        Saved.jump = nil
+    end
+end
+
+local function infJump(on)
+    unbind("infjump")
+    if not on then return end
+    bind("infjump", UserInputService.JumpRequest:Connect(function()
+        local hum = getHum()
+        if hum then hum:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end))
+end
+
+local airPart
+local function airWalk(on)
+    unbind("air")
+    if airPart then airPart:Destroy() airPart = nil end
+    if not on then return end
+
+    airPart = Instance.new("Part")
+    airPart.Name = "BomAirPad"
+    airPart.Size = Vector3.new(8, 1, 8)
+    airPart.Anchored = true
+    airPart.Transparency = 1
+    airPart.CanQuery = false
+    airPart.Parent = workspace
+
+    bind("air", RunService.Heartbeat:Connect(function()
+        local r, h = getRoot(), getHum()
+        if not r or not h or not airPart then return end
+        local feetY = r.Position.Y - (h.HipHeight + r.Size.Y / 2) - 0.5
+        airPart.CFrame = CFrame.new(r.Position.X, feetY, r.Position.Z)
+    end))
+end
+
+local function camZoom(on)
+    if on then
+        if Saved.zoom == nil then Saved.zoom = LocalPlayer.CameraMaxZoomDistance end
+        LocalPlayer.CameraMaxZoomDistance = 1000
+    else
+        LocalPlayer.CameraMaxZoomDistance = Saved.zoom or 128
+        Saved.zoom = nil
+    end
+end
+
+local function antiAfk(on)
+    unbind("afk")
+    if not on then return end
+    local VirtualUser = game:GetService("VirtualUser")
+    bind("afk", LocalPlayer.Idled:Connect(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end))
+end
+
+
+----------------------------------------------------------------
+-- FIX LAG (chỉ ảnh hưởng máy bạn, tắt là khôi phục)
+----------------------------------------------------------------
+local LagFeatures, LAG_IDS = {}, {"lag_fx", "lag_shadow", "lag_post", "lag_mat", "lag_quality", "lag_water", "lag_fps"}
+do
+local Lighting = game:GetService("Lighting")
+local LagOn, LagSaved = {}, {fx = {}, mat = {}, post = {}}
+
+local FX_CLASSES = {ParticleEmitter = true, Trail = true, Beam = true, Smoke = true, Fire = true, Sparkles = true}
+local POST_CLASSES = {BloomEffect = true, BlurEffect = true, ColorCorrectionEffect = true,
+    DepthOfFieldEffect = true, SunRaysEffect = true}
+
+-- duyệt cây theo từng lượt nhỏ để không giật máy
+local function lagScan(root, flag, handle)
+    task.spawn(function()
+        local n = 0
+        for _, d in ipairs(root:GetDescendants()) do
+            if not LagOn[flag] then return end
+            pcall(handle, d)
+            n += 1
+            if n % 300 == 0 then task.wait() end
+        end
+    end)
+end
+
+local function lagFx(on)
+    LagOn.fx = on
+    unbind("lag_fx")
+    if not on then
+        for inst, was in pairs(LagSaved.fx) do pcall(function() inst.Enabled = was end) end
+        LagSaved.fx = {}
+        return
+    end
+    local function handle(d)
+        if FX_CLASSES[d.ClassName] and LagSaved.fx[d] == nil then
+            LagSaved.fx[d] = d.Enabled
+            d.Enabled = false
+        end
+    end
+    lagScan(workspace, "fx", handle)
+    bind("lag_fx", workspace.DescendantAdded:Connect(function(d) pcall(handle, d) end))
+end
+
+local function lagShadow(on)
+    LagOn.shadow = on
+    if on then
+        if LagSaved.shadow == nil then LagSaved.shadow = Lighting.GlobalShadows end
+        Lighting.GlobalShadows = false
+    elseif LagSaved.shadow ~= nil then
+        Lighting.GlobalShadows = LagSaved.shadow
+        LagSaved.shadow = nil
+    end
+end
+
+local function lagPost(on)
+    LagOn.post = on
+    unbind("lag_post")
+    if not on then
+        for inst, was in pairs(LagSaved.post) do pcall(function() inst.Enabled = was end) end
+        LagSaved.post = {}
+        return
+    end
+    local function handle(d)
+        if POST_CLASSES[d.ClassName] and LagSaved.post[d] == nil then
+            LagSaved.post[d] = d.Enabled
+            d.Enabled = false
+        end
+    end
+    lagScan(Lighting, "post", handle)
+    local cam = workspace.CurrentCamera
+    if cam then lagScan(cam, "post", handle) end
+    bind("lag_post", Lighting.DescendantAdded:Connect(function(d) pcall(handle, d) end))
+end
+
+local function lagMat(on)
+    LagOn.mat = on
+    unbind("lag_mat")
+    if not on then
+        for part, old in pairs(LagSaved.mat) do
+            pcall(function()
+                part.Material = old[1]
+                part.Reflectance = old[2]
+            end)
+        end
+        LagSaved.mat = {}
+        return
+    end
+    local function handle(d)
+        if d:IsA("BasePart") and not d:IsA("Terrain") and d.Name ~= "BomAirPad" and LagSaved.mat[d] == nil then
+            LagSaved.mat[d] = {d.Material, d.Reflectance}
+            d.Material = Enum.Material.SmoothPlastic
+            d.Reflectance = 0
+        end
+    end
+    lagScan(workspace, "mat", handle)
+    bind("lag_mat", workspace.DescendantAdded:Connect(function(d) pcall(handle, d) end))
+end
+
+local function lagQuality(on)
+    LagOn.quality = on
+    pcall(function()
+        local r = settings().Rendering
+        if on then
+            if LagSaved.quality == nil then LagSaved.quality = r.QualityLevel end
+            r.QualityLevel = Enum.QualityLevel.Level01
+        elseif LagSaved.quality ~= nil then
+            r.QualityLevel = LagSaved.quality
+            LagSaved.quality = nil
+        end
+    end)
+end
+
+local function lagWater(on)
+    LagOn.water = on
+    local t = workspace:FindFirstChildOfClass("Terrain")
+    if not t then return end
+    if on then
+        if not LagSaved.water then
+            LagSaved.water = {}
+            for _, k in ipairs({"WaterWaveSize", "WaterWaveSpeed", "WaterReflectance", "Decoration"}) do
+                pcall(function() LagSaved.water[k] = t[k] end)
+            end
+        end
+        pcall(function() t.WaterWaveSize = 0 end)
+        pcall(function() t.WaterWaveSpeed = 0 end)
+        pcall(function() t.WaterReflectance = 0 end)
+        pcall(function() t.Decoration = false end)
+    elseif LagSaved.water then
+        for k, v in pairs(LagSaved.water) do pcall(function() t[k] = v end) end
+        LagSaved.water = nil
+    end
+end
+
+local function lagFps(on)
+    LagOn.fps = on
+    if setfpscap then
+        pcall(setfpscap, on and 999 or 60)
+    else
+        warn("[BomHub] executor không hỗ trợ setfpscap")
+    end
+end
+
+
+LagFeatures.lag_fx, LagFeatures.lag_shadow, LagFeatures.lag_post, LagFeatures.lag_mat = lagFx, lagShadow, lagPost, lagMat
+LagFeatures.lag_quality, LagFeatures.lag_water, LagFeatures.lag_fps = lagQuality, lagWater, lagFps
+end
+
+
+----------------------------------------------------------------
+-- HALLOWEEN JJS: định vị cửa + steal door fast
+-- Tìm cửa theo TÊN (game có thể đổi tên object). Nếu không thấy cửa nào, sửa KEYWORDS bên dưới.
+----------------------------------------------------------------
+local HwFeatures, HwRows = {}, {}
+do
+    -- FILL: KEYWORDS (từ khóa trong tên cửa / ObjectText / ActionText của ProximityPrompt)
+    local KEYWORDS = {"door", "pumpkin", "trick", "treat"}
+    local EXCLUDE = {"shop", "portal", "candy"}
+
+    local Doors = {}                 -- [prompt] = {part, hold, los, hl, gui, label}
+    local on = {esp = false, steal = false}
+    local tracking = false
+    local tries = {}
+    local folder = Instance.new("Folder")
+    folder.Name = "BomHwEsp"
+    folder.Parent = ScreenGui
+
+    local function hit(str, list)
+        str = string.lower(str or "")
+        for _, k in ipairs(list or KEYWORDS) do
+            if string.find(str, k, 1, true) then return true end
+        end
+        return false
+    end
+
+    local function anchorOf(pp)
+        local p = pp.Parent
+        if p and p:IsA("Attachment") then p = p.Parent end
+        if p and p:IsA("BasePart") then return p end
+        local m = pp:FindFirstAncestorOfClass("Model")
+        if m then return m.PrimaryPart or m:FindFirstChildWhichIsA("BasePart", true) end
+        return nil
+    end
+
+    local function isDoor(pp)
+        if hit(pp.Name, EXCLUDE) or hit(pp.ObjectText, EXCLUDE) or hit(pp.ActionText, EXCLUDE) then return false end
+        local found = hit(pp.Name) or hit(pp.ObjectText) or hit(pp.ActionText)
+        local p = pp.Parent
+        for _ = 1, 5 do
+            if not p or p == workspace then break end
+            if p:IsA("Model") and p:FindFirstChildOfClass("Humanoid") then return false end -- bỏ qua nhân vật
+            if hit(p.Name, EXCLUDE) then return false end
+            if hit(p.Name) then found = true end
+            p = p.Parent
+        end
+        return found
+    end
+
+    local function makeEsp(pp)
+        local d = Doors[pp]
+        if not d or d.hl then return end
+        local target = d.part
+        local m = d.part:FindFirstAncestorOfClass("Model")
+        if m and hit(m.Name) then target = m end
+
+        local hl = Instance.new("Highlight")
+        hl.Adornee = target
+        hl.FillColor = rgb(255, 140, 0)
+        hl.OutlineColor = Color3.new(1, 1, 1)
+        hl.FillTransparency = 0.55
+        hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        hl.Parent = folder
+
+        local gui = Instance.new("BillboardGui")
+        gui.Adornee = d.part
+        gui.AlwaysOnTop = true
+        gui.Size = UDim2.fromOffset(160, 40)
+        gui.StudsOffset = Vector3.new(0, 3, 0)
+        gui.Parent = folder
+
+        local lb = Instance.new("TextLabel")
+        lb.BackgroundTransparency = 1
+        lb.Size = UDim2.fromScale(1, 1)
+        lb.Font = Enum.Font.GothamBold
+        lb.TextSize = 15
+        lb.TextColor3 = rgb(255, 160, 40)
+        lb.TextStrokeTransparency = 0.3
+        lb.Text = "DOOR"
+        lb.Parent = gui
+
+        d.hl, d.gui, d.label = hl, gui, lb
+    end
+
+    local function removeEsp(d)
+        if d.hl then d.hl:Destroy() d.hl = nil end
+        if d.gui then d.gui:Destroy() d.gui = nil end
+        d.label = nil
+    end
+
+    local function setFast(pp, d, fast)
+        pcall(function()
+            if fast then
+                pp.HoldDuration = 0
+                pp.RequiresLineOfSight = false
+            else
+                pp.HoldDuration = d.hold
+                pp.RequiresLineOfSight = d.los
+            end
+        end)
+    end
+
+    local function add(inst)
+        if Doors[inst] or not inst:IsA("ProximityPrompt") then return end
+        if not isDoor(inst) then return end
+        local part = anchorOf(inst)
+        if not part then return end
+        local d = {part = part, hold = inst.HoldDuration, los = inst.RequiresLineOfSight}
+        Doors[inst] = d
+        if on.steal then setFast(inst, d, true) end
+        if on.esp then makeEsp(inst) end
+    end
+
+    local function drop(pp)
+        local d = Doors[pp]
+        if d then
+            removeEsp(d)
+            Doors[pp] = nil
+        end
+    end
+
+    local function setRows(count, near)
+        if HwRows.count then HwRows.count.Text = count end
+        if HwRows.near then HwRows.near.Text = near end
+    end
+
+    local function refreshTracking()
+        local need = on.esp or on.steal
+        if need and not tracking then
+            tracking = true
+            task.spawn(function()
+                local n = 0
+                for _, d in ipairs(workspace:GetDescendants()) do
+                    if not tracking then return end
+                    pcall(add, d)
+                    n += 1
+                    if n % 400 == 0 then task.wait() end
+                end
+            end)
+            bind("hw_add", workspace.DescendantAdded:Connect(function(d) pcall(add, d) end))
+            bind("hw_rem", workspace.DescendantRemoving:Connect(function(d)
+                if Doors[d] then drop(d) end
+            end))
+
+            local acc = 0
+            bind("hw_loop", RunService.Heartbeat:Connect(function(dt)
+                acc += dt
+                if acc < 0.1 then return end
+                acc = 0
+                local root = getRoot()
+
+                local n, nearest = 0, nil
+                for pp, d in pairs(Doors) do
+                    if not pp.Parent or not d.part.Parent then
+                        drop(pp)
+                    else
+                        n += 1
+                        local dist = root and (d.part.Position - root.Position).Magnitude or nil
+                        if dist and (not nearest or dist < nearest) then nearest = dist end
+                        if d.label and dist then d.label.Text = string.format("DOOR  %dm", math.floor(dist + 0.5)) end
+                    end
+                end
+                setRows(tostring(n), nearest and (math.floor(nearest + 0.5) .. " studs") or "-")
+            end))
+        elseif not need and tracking then
+            tracking = false
+            unbind("hw_add")
+            unbind("hw_rem")
+            unbind("hw_loop")
+            for pp, d in pairs(Doors) do
+                setFast(pp, d, false)
+                removeEsp(d)
+                Doors[pp] = nil
+            end
+            tries = {}
+            setRows("-", "-")
+        end
+    end
+
+    -- chỉ chạy khi BẠN bấm nút: dịch chuyển tới cửa gần nhất rồi mở một lần
+    HwRows.go = function()
+        local root, hum = getRoot(), getHum()
+        if not tracking or not root or not hum or hum.Health <= 0 then return false end
+        local best, bestDist, bd
+        for pp, d in pairs(Doors) do
+            if pp.Parent and d.part.Parent and pp.Enabled then
+                local dist = (d.part.Position - root.Position).Magnitude
+                if not bestDist or dist < bestDist then best, bestDist, bd = pp, dist, d end
+            end
+        end
+        if not best then return false end
+        setFast(best, bd, true)
+        if bestDist > 6 then
+            local dir = root.Position - bd.part.Position
+            dir = Vector3.new(dir.X, 0, dir.Z)
+            dir = dir.Magnitude > 0.1 and dir.Unit or Vector3.new(0, 0, 1)
+            root.CFrame = CFrame.new(bd.part.Position + dir * 3.5 + Vector3.new(0, 2, 0), bd.part.Position)
+        end
+        task.spawn(function()
+            task.wait(0.08)
+            if fireproximityprompt then
+                pcall(fireproximityprompt, best)
+            else
+                pcall(function()
+                    best:InputHoldBegin()
+                    task.wait(0.05)
+                    best:InputHoldEnd()
+                end)
+            end
+        end)
+        return true
+    end
+
+    HwFeatures.hw_esp = function(v)
+        on.esp = v
+        if v then
+            for pp in pairs(Doors) do makeEsp(pp) end
+        else
+            for _, d in pairs(Doors) do removeEsp(d) end
+        end
+        refreshTracking()
+    end
+
+    HwFeatures.hw_steal = function(v)
+        on.steal = v
+        for pp, d in pairs(Doors) do setFast(pp, d, v) end
+        refreshTracking()
+    end
+end
+
+----------------------------------------------------------------
+-- FAKE ADMIN (chỉ có trong menu ADMIN): thẻ Developer + dấu Verified trên đầu nhân vật
+-- Người chơi thường không thấy (client không đổi được dữ liệu server gửi đi). Người dùng hub cùng server + cùng SYNC_URL thì thấy tag của nhau.
+----------------------------------------------------------------
+local FakeAdminFeatures = {}
+do
+    -- FILL: SYNC_URL (URL public của tag_server.js; ai dùng cùng URL thì thấy tag của nhau)
+    local SYNC_URL = "http://127.0.0.1:3000" -- 127.0.0.1 = chỉ máy bạn, đổi sang server thật để người khác thấy
+    local httpReq = (syn and syn.request) or http_request or request or (http and http.request)
+    local VERIFY_GLYPH = utf8.char(0xE000) -- ký tự dấu tích xanh có sẵn của Roblox
+    local jobId = (game.JobId ~= "" and game.JobId) or "studio"
+
+    local FA = {dev = false, verify = false}
+    local remote = {}                              -- [userId] = {dev, verify} của người dùng hub khác
+    local origDist = setmetatable({}, {__mode = "k"}) -- [Humanoid] = kiểu hiện tên gốc
+
+    local function clearTag(char)
+        if not char then return end
+        for _, d in ipairs(char:GetDescendants()) do
+            if d.Name == "BomFakeTag" then d:Destroy() end
+        end
+    end
+
+    local function hasTag(plr)
+        local char = plr.Character
+        if not char then return false end
+        for _, d in ipairs(char:GetDescendants()) do
+            if d.Name == "BomFakeTag" then return true end
+        end
+        return false
+    end
+
+    -- vẽ thẻ lên đầu 1 người chơi (mình hoặc người dùng hub khác)
+    local function applyTag(plr, flags)
+        local char = plr.Character
+        local head = char and char:FindFirstChild("Head")
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        clearTag(char)
+        local active = flags and (flags.dev or flags.verify)
+        if hum then
+            if active then
+                if origDist[hum] == nil then origDist[hum] = hum.DisplayDistanceType end
+                hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None -- ẩn tên mặc định để khỏi bị đúp
+            elseif origDist[hum] ~= nil then
+                hum.DisplayDistanceType = origDist[hum]
+                origDist[hum] = nil
+            end
+        end
+        if not active or not head then return end
+
+        local g = Instance.new("BillboardGui")
+        g.Name = "BomFakeTag"
+        g.Adornee = head
+        g.Size = UDim2.fromOffset(240, 56)
+        g.StudsOffset = Vector3.new(0, 3.1, 0)
+        g.AlwaysOnTop = false
+        g.Parent = head
+
+        local lay = Instance.new("UIListLayout")
+        lay.SortOrder = Enum.SortOrder.LayoutOrder
+        lay.HorizontalAlignment = Enum.HorizontalAlignment.Center
+        lay.VerticalAlignment = Enum.VerticalAlignment.Bottom
+        lay.Parent = g
+
+        local nm = Instance.new("TextLabel")
+        nm.BackgroundTransparency = 1
+        nm.Size = UDim2.new(1, 0, 0, 28)
+        nm.LayoutOrder = 2
+        nm.Font = Enum.Font.GothamBold
+        nm.TextSize = 20
+        nm.TextColor3 = Color3.new(1, 1, 1)
+        nm.TextStrokeTransparency = 0.4
+        nm.Text = plr.DisplayName .. (flags.verify and (" " .. VERIFY_GLYPH) or "")
+        nm.Parent = g
+
+        if flags.dev then
+            local dv = Instance.new("TextLabel")
+            dv.BackgroundTransparency = 1
+            dv.Size = UDim2.new(1, 0, 0, 20)
+            dv.LayoutOrder = 1
+            dv.Font = Enum.Font.GothamBold
+            dv.TextSize = 14
+            dv.TextColor3 = rgb(170, 120, 255)
+            dv.TextStrokeTransparency = 0.4
+            dv.Text = "</> DEVELOPER"
+            dv.Parent = g
+        end
+    end
+
+    ----------------------------------------------------------
+    -- đồng bộ qua relay: người dùng hub cùng server thấy tag của nhau
+    ----------------------------------------------------------
+    local function api(method, path, body)
+        if not httpReq or SYNC_URL == "" then return nil end
+        local ok, res = pcall(httpReq, {
+            Url = SYNC_URL .. path,
+            Method = method,
+            Headers = {["Content-Type"] = "application/json"},
+            Body = body and HttpService:JSONEncode(body) or nil,
+        })
+        if not ok or type(res) ~= "table" or res.StatusCode ~= 200 then return nil end
+        local ok2, data = pcall(function() return HttpService:JSONDecode(res.Body) end)
+        return ok2 and data or nil
+    end
+
+    local function push()
+        task.spawn(function()
+            api("POST", "/tag", {job = jobId, userId = LocalPlayer.UserId, dev = FA.dev, verify = FA.verify})
+        end)
+    end
+
+    local function pull()
+        local data = api("GET", "/tags?job=" .. HttpService:UrlEncode(jobId))
+        if not data or type(data.tags) ~= "table" then return end
+        local seen = {}
+        for _, t in ipairs(data.tags) do
+            local uid = type(t) == "table" and tonumber(t.userId)
+            if uid and uid ~= LocalPlayer.UserId then
+                local plr = Players:GetPlayerByUserId(uid)
+                if plr then
+                    seen[uid] = true
+                    local flags = {dev = t.dev == true, verify = t.verify == true}
+                    local old = remote[uid]
+                    if not old or old.dev ~= flags.dev or old.verify ~= flags.verify or not hasTag(plr) then
+                        remote[uid] = flags
+                        applyTag(plr, flags)
+                    end
+                end
+            end
+        end
+        for uid in pairs(remote) do
+            if not seen[uid] then
+                remote[uid] = nil
+                local plr = Players:GetPlayerByUserId(uid)
+                if plr then applyTag(plr, nil) end
+            end
+        end
+    end
+
+    task.spawn(function()
+        if not httpReq or SYNC_URL == "" then return end
+        local n = 0
+        while ScreenGui.Parent do
+            pcall(pull)
+            n += 1
+            if n % 3 == 0 and (FA.dev or FA.verify) then push() end -- heartbeat ~9s, server giữ thẻ 25s
+            task.wait(3)
+        end
+    end)
+
+    ScreenGui.Destroying:Connect(function()
+        FA.dev, FA.verify = false, false
+        pcall(function()
+            applyTag(LocalPlayer, nil)
+            for uid in pairs(remote) do
+                local plr = Players:GetPlayerByUserId(uid)
+                if plr then applyTag(plr, nil) end
+            end
+        end)
+        push()
+    end)
+
+    FakeAdminFeatures.fk_dev = function(v)
+        FA.dev = v
+        applyTag(LocalPlayer, FA)
+        push()
+    end
+    FakeAdminFeatures.fk_verify = function(v)
+        FA.verify = v
+        applyTag(LocalPlayer, FA)
+        push()
+    end
+end
+
+local Features = {
+    god = godMode, invis = invisible, fly = fly, fly2 = fly2, speed = speed, speed2 = speed2,
+    jump = highJump, inf = infJump, air = airWalk, cam = camZoom, afk = antiAfk,
+}
+for k, f in pairs(LagFeatures) do Features[k] = f end
+for k, f in pairs(HwFeatures) do Features[k] = f end
+for k, f in pairs(FakeAdminFeatures) do Features[k] = f end
+
+----------------------------------------------------------------
+-- NÚT BẬT/TẮT TÍNH NĂNG
+----------------------------------------------------------------
+local ScriptStates, ScriptControls, ScriptButtons, SearchText = {}, {}, {}, {}
+local PopupDefs, openPopup = {}, nil
+local EXCLUSIVE = {fly = "fly2", fly2 = "fly", speed = "speed2", speed2 = "speed"}
+local islandNotify, setIslandEnabled -- gán ở phần Dynamic Island bên dưới
+
+local function scriptButton(id, parent)
+    local btn = card(parent)
+
+    local dot = Instance.new("Frame")
+    dot.Size = UDim2.fromOffset(9, 9)
+    dot.AnchorPoint = Vector2.new(0, 0.5)
+    dot.Position = UDim2.new(0, 16, 0.5, 0)
+    dot.BorderSizePixel = 0
+    dot.ZIndex = 3
+    dot.Parent = btn
+    corner(dot, 5)
+
+    local glow = Instance.new("UIStroke")
+    glow.Transparency = 0.4
+    glow.Thickness = 2
+    glow.Parent = dot
+
+    local label = newLabel(btn, 14, "Text")
+    label.Position = UDim2.fromOffset(34, 0)
+    label.Size = UDim2.new(1, -44, 1, 0)
+    label.TextTruncate = Enum.TextTruncate.AtEnd
+    label.ZIndex = 2
+    loc(label, "sc_" .. id)
+
+    ScriptStates[id] = false
+
+    local function paint()
+        local c = ScriptStates[id] and Theme.Good or Theme.Accent
+        dot.BackgroundColor3 = c
+        glow.Color = c
+    end
+    paint()
+    table.insert(ThemeUpdaters, paint)
+
+    local function set(on)
+        if ScriptStates[id] == on then return end
+        local partner = EXCLUSIVE[id]
+        if on and partner and ScriptStates[partner] and ScriptControls[partner] then
+            ScriptControls[partner](false)
+        end
+        ScriptStates[id] = on
+        paint()
+        local ok, err = pcall(Features[id], on)
+        if not ok then warn("[BomHub] " .. id .. ": " .. tostring(err)) end
+        if islandNotify then pcall(islandNotify, id, on) end
+    end
+    ScriptControls[id] = set
+
+    btn.MouseButton1Click:Connect(function()
+        if PopupDefs[id] and openPopup then openPopup(id) else set(not ScriptStates[id]) end
+    end)
+
+    ScriptButtons[id] = btn
+    SearchText[id] = fold((Lang.vi["sc_" .. id] or "") .. " " .. (Lang.en["sc_" .. id] or ""))
+    return btn
+end
+
+for _, id in ipairs({"god", "invis", "fly", "fly2", "speed", "speed2", "jump", "inf", "air", "cam"}) do
+    scriptButton(id, PageScripts)
+end
+
+----------------------------------------------------------------
+-- MINI MENU RIÊNG (fly / fly2 / speed / speed2)
+-- KHÔNG gắn vào menu chính: ẩn menu chính vẫn còn, kéo tự do, tự đóng bằng nút ×.
+-- bật/tắt + chỉnh tốc độ nằm trong mini menu. V2 có animation đầy đủ hơn V1.
+----------------------------------------------------------------
+local Popups, openCount, topZ = {}, 0, 30
+local SK = IS_TOUCH and 24 or 18   -- núm kéo to hơn trên cảm ứng
+local XB = IS_TOUCH and 36 or 28   -- nút × to hơn trên cảm ứng
+
+-- co mini menu cho vừa màn hình điện thoại
+local function miniBase()
+    local vp = ScreenGui.AbsoluteSize
+    if vp.X < 10 then return 1 end
+    return math.clamp(math.min((vp.X - 24) / 290, (vp.Y - 24) / 176, 1), 0.5, 1)
+end
+local EASE_OUT  = TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local EASE_IN   = TweenInfo.new(0.18, Enum.EasingStyle.Quad,  Enum.EasingDirection.In)
+local EASE_FAST = TweenInfo.new(0.1,  Enum.EasingStyle.Quad,  Enum.EasingDirection.Out)
+local EASE_SLOW = TweenInfo.new(0.42, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+
+local function buildPopup(id, def)
+    local P = {tok = 0, rows = {}, isOpen = false}
+    local fx = {}   -- tween đang lặp, để dừng khi đóng
+
+    -- holder: khung ngoài, dùng để kéo + chặn click xuyên
+    local h = Instance.new("Frame")
+    h.AnchorPoint = Vector2.new(0.5, 0.5)
+    h.Position = UDim2.new(0.5, 0, 0.5, 0)
+    h.Size = UDim2.fromOffset(290, 176)
+    h.BackgroundTransparency = 1
+    h.Active = true
+    h.ZIndex = 30
+    h.Visible = false
+    h.Parent = ScreenGui
+
+    -- bóng đổ
+    local shadow = Instance.new("Frame")
+    shadow.AnchorPoint = Vector2.new(0.5, 0.5)
+    shadow.Position = UDim2.new(0.5, 0, 0.5, 6)
+    shadow.Size = UDim2.new(1, 14, 1, 14)
+    shadow.BackgroundColor3 = Color3.new(0, 0, 0)
+    shadow.BackgroundTransparency = 0.6
+    shadow.BorderSizePixel = 0
+    shadow.Parent = h
+    corner(shadow, 20)
+
+    local g = Instance.new("CanvasGroup")
+    g.AnchorPoint = Vector2.new(0.5, 0.5)
+    g.Position = UDim2.fromScale(0.5, 0.5)
+    g.Size = UDim2.fromScale(1, 1)
+    g.BorderSizePixel = 0
+    g.Active = true
+    themed(g, "BackgroundColor3", "Card")
+    g.Parent = h
+    corner(g, 14)
+    stroke(g, "Accent", 1.5, 0.15)
+
+    local sc = Instance.new("UIScale")
+    sc.Parent = h
+
+    -- thanh tiêu đề (kéo được)
+    local head = Instance.new("Frame")
+    head.Size = UDim2.new(1, 0, 0, 46)
+    head.BackgroundTransparency = 1
+    head.Parent = g
+    makeDraggable(head, h)
+    head.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            topZ += 1
+            h.ZIndex = topZ
+        end
+    end)
+
+    local dot = Instance.new("Frame")
+    dot.AnchorPoint = Vector2.new(0, 0.5)
+    dot.Position = UDim2.new(0, 18, 0.5, 0)
+    dot.Size = UDim2.fromOffset(10, 10)
+    dot.BorderSizePixel = 0
+    dot.Parent = head
+    corner(dot, 5)
+    local ring = Instance.new("UIStroke")
+    ring.Thickness = 2
+    ring.Transparency = 0.45
+    ring.Parent = dot
+
+    local title = newLabel(head, 15, "Text")
+    title.Position = UDim2.fromOffset(38, 0)
+    title.Size = UDim2.new(1, -86, 1, 0)
+    loc(title, def.title)
+
+    local x = Instance.new("TextButton")
+    x.Text = "×"
+    x.Font = Enum.Font.GothamBold
+    x.TextSize = 18
+    x.TextColor3 = Theme.SubText
+    x.AutoButtonColor = false
+    x.AnchorPoint = Vector2.new(1, 0.5)
+    x.Position = UDim2.new(1, -12, 0.5, 0)
+    x.Size = UDim2.fromOffset(XB, XB)
+    themed(x, "BackgroundColor3", "Panel")
+    x.Parent = head
+    corner(x, 14)
+    x.MouseEnter:Connect(function() tween(x, {TextColor3 = rgb(255, 110, 110)}) end)
+    x.MouseLeave:Connect(function() tween(x, {TextColor3 = Theme.SubText}) end)
+
+    -- vạch phân cách mảnh dưới tiêu đề
+    local line = Instance.new("Frame")
+    line.Position = UDim2.fromOffset(18, 46)
+    line.Size = UDim2.new(1, -36, 0, 1)
+    line.BorderSizePixel = 0
+    line.BackgroundTransparency = 0.6
+    themed(line, "BackgroundColor3", "Accent")
+    line.Parent = g
+
+    -- hàng công tắc
+    local row = Instance.new("TextButton")
+    row.Text = ""
+    row.AutoButtonColor = false
+    row.Position = UDim2.fromOffset(18, 58)
+    row.Size = UDim2.new(1, -36, 0, 40)
+    row.BorderSizePixel = 0
+    themed(row, "BackgroundColor3", "Panel")
+    row.Parent = g
+    corner(row, 11)
+    row.MouseEnter:Connect(function() tween(row, {BackgroundColor3 = Theme.CardHi}) end)
+    row.MouseLeave:Connect(function() tween(row, {BackgroundColor3 = Theme.Panel}) end)
+
+    local rl = newLabel(row, 13, "Text")
+    rl.Position = UDim2.fromOffset(14, 0)
+    rl.Size = UDim2.new(1, -80, 1, 0)
+    loc(rl, "pp_enable")
+
+    local track = Instance.new("Frame")
+    track.AnchorPoint = Vector2.new(1, 0.5)
+    track.Position = UDim2.new(1, -12, 0.5, 0)
+    track.Size = UDim2.fromOffset(46, 24)
+    track.BorderSizePixel = 0
+    track.Parent = row
+    corner(track, 12)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.fromOffset(18, 18)
+    knob.Position = UDim2.fromOffset(3, 3)
+    knob.BackgroundColor3 = Color3.new(1, 1, 1)
+    knob.BorderSizePixel = 0
+    knob.ZIndex = 2
+    knob.Parent = track
+    corner(knob, 9)
+
+    -- khối thanh tốc độ
+    local box = Instance.new("TextButton") -- cả khối là vùng chạm, kéo ở đâu cũng được
+    box.Text = ""
+    box.AutoButtonColor = false
+    box.Position = UDim2.fromOffset(18, 108)
+    box.Size = UDim2.new(1, -36, 0, 56)
+    box.BackgroundTransparency = 1
+    box.Parent = g
+
+    local sl = newLabel(box, 12, "SubText")
+    sl.Size = UDim2.new(0.6, 0, 0, 18)
+    loc(sl, "pp_speed")
+
+    local vl = newLabel(box, 14, "Text", Enum.TextXAlignment.Right)
+    vl.Position = UDim2.new(0.4, 0, 0, 0)
+    vl.Size = UDim2.new(0.6, 0, 0, 18)
+
+    local bar = Instance.new("Frame")
+    bar.Position = UDim2.fromOffset(0, 32)
+    bar.Size = UDim2.new(1, 0, 0, 10)
+    bar.BorderSizePixel = 0
+    themed(bar, "BackgroundColor3", "Panel")
+    bar.Parent = box
+    corner(bar, 5)
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.fromScale(0, 1)
+    fill.BorderSizePixel = 0
+    themed(fill, "BackgroundColor3", "Accent")
+    fill.Parent = bar
+    corner(fill, 5)
+
+    local sk = Instance.new("Frame")
+    sk.AnchorPoint = Vector2.new(0.5, 0.5)
+    sk.Size = UDim2.fromOffset(SK, SK)
+    sk.BackgroundColor3 = Color3.new(1, 1, 1)
+    sk.BorderSizePixel = 0
+    sk.ZIndex = 2
+    sk.Parent = bar
+    corner(sk, 9)
+
+    -- các hàng sẽ trượt vào lần lượt khi mở
+    P.rows = {
+        {obj = row, home = row.Position},
+        {obj = box, home = box.Position},
+    }
+
+    ----------------------------------------------------------
+    -- trạng thái công tắc
+    ----------------------------------------------------------
+    local function stopFx()
+        for k, tw in pairs(fx) do tw:Cancel() fx[k] = nil end
+        ring.Transparency = 0.5
+    end
+
+    function P.paintSwitch(animate)
+        local on = ScriptStates[id]
+        local pos = on and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3)
+        local col = on and Theme.Good or Theme.CardHi
+        local dcol = on and Theme.Good or Theme.SubText
+        if fx.pulse then fx.pulse:Cancel() fx.pulse = nil end
+        ring.Transparency = 0.5
+        if animate then
+            TweenService:Create(knob, EASE_OUT, {Position = pos}):Play()
+            TweenService:Create(track, EASE_OUT, {BackgroundColor3 = col}):Play()
+            TweenService:Create(dot, EASE_OUT, {BackgroundColor3 = dcol}):Play()
+        else
+            knob.Position = pos
+            track.BackgroundColor3 = col
+            dot.BackgroundColor3 = dcol
+        end
+        ring.Color = dcol
+        -- V2: quầng sáng quanh chấm trạng thái thở nhẹ khi đang bật
+        if on and def.anim then
+            fx.pulse = TweenService:Create(ring,
+                TweenInfo.new(1.1, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+                {Transparency = 0.9})
+            fx.pulse:Play()
+        end
+    end
+    table.insert(ThemeUpdaters, function() P.paintSwitch(false) end)
+
+    local function toggle()
+        ScriptControls[id](not ScriptStates[id])
+        P.paintSwitch(true)
+    end
+    row.MouseButton1Click:Connect(toggle)
+
+    ----------------------------------------------------------
+    -- thanh tốc độ
+    ----------------------------------------------------------
+    function P.paintSlider(animate)
+        local v = def.get()
+        local rel = math.clamp((v - def.min) / (def.max - def.min), 0, 1)
+        vl.Text = tostring(v)
+        if animate then
+            TweenService:Create(fill, EASE_FAST, {Size = UDim2.fromScale(rel, 1)}):Play()
+            TweenService:Create(sk, EASE_FAST, {Position = UDim2.new(rel, 0, 0.5, 0)}):Play()
+        else
+            fill.Size = UDim2.fromScale(rel, 1)
+            sk.Position = UDim2.new(rel, 0, 0.5, 0)
+        end
+    end
+
+    local dragging = false
+    local function fromX(px)
+        local rel = math.clamp((px - bar.AbsolutePosition.X) / math.max(bar.AbsoluteSize.X, 1), 0, 1)
+        def.set(math.floor(def.min + (def.max - def.min) * rel + 0.5))
+        P.paintSlider(true)
+    end
+    box.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            TweenService:Create(sk, EASE_FAST, {Size = UDim2.fromOffset(SK + 4, SK + 4)}):Play()
+            fromX(input.Position.X)
+        end
+    end)
+    bind("pp_mv_" .. id, UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            fromX(input.Position.X)
+        end
+    end))
+    bind("pp_end_" .. id, UserInputService.InputEnded:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            dragging = false
+            TweenService:Create(sk, EASE_OUT, {Size = UDim2.fromOffset(SK, SK)}):Play()
+        end
+    end))
+
+    ----------------------------------------------------------
+    -- mở / đóng
+    ----------------------------------------------------------
+    function P.open()
+        P.isOpen = true
+        topZ += 1
+        h.ZIndex = topZ
+        if not P.placed then
+            P.placed = true
+            h.Position = UDim2.new(0.68, openCount * 20, 0.5, openCount * 20 - 10)
+            openCount += 1
+        end
+        P.tok += 1
+        local tok = P.tok
+        stopFx()
+        P.paintSwitch(false)
+        P.paintSlider(false)
+
+        -- mở: mờ dần hiện + phóng nhẹ + nổi lên một chút, không nảy
+        h.Visible = true
+        local base = miniBase()
+        P.base = base
+        sc.Scale = base * (def.anim and 0.9 or 0.95)
+        g.GroupTransparency = 1
+        g.Position = UDim2.new(0.5, 0, 0.5, 10)
+        local info = def.anim and EASE_SLOW or EASE_OUT
+        TweenService:Create(sc, info, {Scale = base}):Play()
+        TweenService:Create(g, info, {GroupTransparency = 0, Position = UDim2.fromScale(0.5, 0.5)}):Play()
+
+        -- hai hàng nổi lên lần lượt, rất nhẹ
+        for i, r in ipairs(P.rows) do
+            r.obj.Position = r.home + UDim2.fromOffset(0, 8)
+            task.delay((def.anim and 0.07 or 0.04) * i, function()
+                if tok ~= P.tok then return end
+                TweenService:Create(r.obj, EASE_SLOW, {Position = r.home}):Play()
+            end)
+        end
+    end
+
+    function P.hide(instant)
+        P.isOpen = false
+        P.tok += 1
+        local tok = P.tok
+        stopFx()
+        local function finish()
+            if tok ~= P.tok then return end
+            h.Visible = false
+        end
+        if instant then
+            finish()
+        else
+            TweenService:Create(sc, EASE_IN, {Scale = (P.base or 1) * 0.96}):Play()
+            TweenService:Create(g, EASE_IN, {GroupTransparency = 1,
+                Position = UDim2.new(0.5, 0, 0.5, 6)}):Play()
+            task.delay(0.19, finish)
+        end
+    end
+
+    x.MouseButton1Click:Connect(function() P.hide() end)
+    return P
+end
+
+PopupDefs.fly    = {title = "sc_fly",    min = 10, max = 300, anim = false,
+    get = function() return FLY_SPEED end,    set = function(v) FLY_SPEED = v end}
+PopupDefs.fly2   = {title = "sc_fly2",   min = 10, max = 400, anim = true,
+    get = function() return FLY2_SPEED end,   set = function(v) FLY2_SPEED = v end}
+PopupDefs.speed  = {title = "sc_speed",  min = 16, max = 250, anim = false,
+    get = function() return SPEED_VALUE end,  set = function(v) SPEED_VALUE = v end}
+PopupDefs.speed2 = {title = "sc_speed2", min = 16, max = 300, anim = true,
+    get = function() return SPEED2_VALUE end, set = function(v) SPEED2_VALUE = v end}
+
+openPopup = function(id)
+    local def = PopupDefs[id]
+    if not Popups[id] then Popups[id] = buildPopup(id, def) end
+    if Popups[id].isOpen then
+        Popups[id].hide()
+    else
+        Popups[id].open()
+    end
+end
+
+-- tìm kiếm (bỏ dấu, tìm được cả tiếng Việt lẫn tiếng Anh)
+SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    local q = fold(SearchBox.Text)
+    if q ~= "" and currentTab ~= "scripts" then setTab("scripts") end
+    for id, btn in pairs(ScriptButtons) do
+        if btn.Parent == PageScripts then
+            btn.Visible = q == "" or SearchText[id]:find(q, 1, true) ~= nil
+        end
+    end
+end)
+
+----------------------------------------------------------------
+-- TAB MÁY CHỦ
+----------------------------------------------------------------
+local fps = 60
+bind("fps", RunService.RenderStepped:Connect(function(dt)
+    if dt > 0 then fps = fps + (1 / dt - fps) * 0.1 end
+end))
+
+local sv = {
+    player = infoRow(PageServer, "sv_player"),
+    count  = infoRow(PageServer, "sv_count"),
+    ping   = infoRow(PageServer, "sv_ping"),
+    fps    = infoRow(PageServer, "sv_fps"),
+    job    = infoRow(PageServer, "sv_job"),
+    place  = infoRow(PageServer, "sv_place"),
+    role   = infoRow(PageServer, "sv_role"),
+}
+
+local function refreshServer()
+    sv.role.Text = T(ROLE == "admin" and "role_admin" or "role_member")
+    sv.player.Text = LocalPlayer.DisplayName .. " (@" .. LocalPlayer.Name .. ")"
+    sv.count.Text = #Players:GetPlayers() .. "/" .. Players.MaxPlayers
+    local ok, ping = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+    sv.ping.Text = ok and (math.floor(ping) .. " ms") or "?"
+    sv.fps.Text = tostring(math.floor(fps + 0.5))
+    sv.job.Text = game.JobId ~= "" and (game.JobId:sub(1, 8) .. "...") or "Studio"
+    sv.place.Text = tostring(game.PlaceId)
+end
+
+task.spawn(function()
+    while ScreenGui.Parent do
+        if Wrapper.Visible and PageServer.Visible then pcall(refreshServer) end
+        task.wait(0.5)
+    end
+end)
+
+actionButton(PageServer, "sv_rejoin", function()
+    local ok = pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end)
+    if not ok then pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end) end
+end)
+
+actionButton(PageServer, "sv_hop", function(label, key)
+    task.spawn(function()
+        label.Text = T("sv_hopping")
+        local found = false
+        local ok, body = pcall(function()
+            return game:HttpGet("https://games.roblox.com/v1/games/" .. tostring(game.PlaceId)
+                .. "/servers/Public?sortOrder=Asc&limit=100")
+        end)
+        if ok then
+            local ok2, data = pcall(function() return HttpService:JSONDecode(body) end)
+            if ok2 and type(data) == "table" and data.data then
+                for _, s in ipairs(data.data) do
+                    if s.id ~= game.JobId and s.playing < s.maxPlayers then
+                        found = true
+                        pcall(function()
+                            TeleportService:TeleportToPlaceInstance(game.PlaceId, s.id, LocalPlayer)
+                        end)
+                        break
+                    end
+                end
+            end
+        end
+        if not found then flash(label, key, "sv_nohop") end
+    end)
+end)
+
+actionButton(PageServer, "sv_copy", function(label, key)
+    if setclipboard then
+        setclipboard(game.JobId)
+        flash(label, key, "sv_copied")
+    else
+        flash(label, key, "sv_noclip")
+    end
+end)
+
+----------------------------------------------------------------
+-- TAB KHÁC
+----------------------------------------------------------------
+local LagHint = newLabel(PageLag, 12, "SubText")
+LagHint.Font = Enum.Font.Gotham
+LagHint.Size = UDim2.new(1, -10, 0, 34)
+LagHint.TextWrapped = true
+LagHint.TextYAlignment = Enum.TextYAlignment.Top
+place(LagHint, PageLag)
+loc(LagHint, "lag_hint")
+
+for _, id in ipairs(LAG_IDS) do scriptButton(id, PageLag) end
+
+actionButton(PageLag, "lag_all", function()
+    for _, id in ipairs(LAG_IDS) do ScriptControls[id](true) end
+end)
+actionButton(PageLag, "lag_none", function()
+    for _, id in ipairs(LAG_IDS) do ScriptControls[id](false) end
+end)
+
+local HwHint = newLabel(PageHalloween, 12, "SubText")
+HwHint.Font = Enum.Font.Gotham
+HwHint.Size = UDim2.new(1, -10, 0, 64)
+HwHint.TextWrapped = true
+HwHint.TextYAlignment = Enum.TextYAlignment.Top
+place(HwHint, PageHalloween)
+loc(HwHint, "hw_hint")
+
+HwRows.count = infoRow(PageHalloween, "hw_doors")
+HwRows.near = infoRow(PageHalloween, "hw_near")
+scriptButton("hw_esp", PageHalloween)
+scriptButton("hw_steal", PageHalloween)
+actionButton(PageHalloween, "hw_go", function(label, key)
+    if not (HwRows.go and HwRows.go()) then flash(label, key, "hw_need") end
+end)
+
+local FaHint = newLabel(PageFakeAdmin, 12, "SubText")
+FaHint.Font = Enum.Font.Gotham
+FaHint.Size = UDim2.new(1, -10, 0, 50)
+FaHint.TextWrapped = true
+FaHint.TextYAlignment = Enum.TextYAlignment.Top
+place(FaHint, PageFakeAdmin)
+loc(FaHint, "fa_hint")
+scriptButton("fk_dev", PageFakeAdmin)
+scriptButton("fk_verify", PageFakeAdmin)
+
+scriptButton("afk", PageMisc)
+
+actionButton(PageMisc, "ms_reset", function()
+    local hum = getHum()
+    if hum then hum.Health = 0 end
+end)
+
+actionButton(PageMisc, "ms_off", function()
+    for _, set in pairs(ScriptControls) do set(false) end
+    for _, pp in pairs(Popups) do pp.paintSwitch(true) end
+end)
+
+actionButton(PageMisc, "ms_close", function()
+    for _, set in pairs(ScriptControls) do set(false) end
+    for k in pairs(Conns) do unbind(k) end
+    for _, c in ipairs(DragConns) do c:Disconnect() end
+    ScreenGui:Destroy()
+end)
+
+----------------------------------------------------------------
+-- TAB CÀI ĐẶT
+----------------------------------------------------------------
+do
+-- Ngôn ngữ
+sectionLabel(PageSettings, "st_lang")
+
+local LangRow = Instance.new("Frame")
+LangRow.Size = UDim2.new(1, -10, 0, 46)
+LangRow.BackgroundTransparency = 1
+place(LangRow, PageSettings)
+LangRow.Parent = PageSettings
+local LangLayout = Instance.new("UIListLayout")
+LangLayout.FillDirection = Enum.FillDirection.Horizontal
+LangLayout.Padding = UDim.new(0, 10)
+LangLayout.SortOrder = Enum.SortOrder.LayoutOrder
+LangLayout.Parent = LangRow
+
+local LangButtons = {}
+local function setLang(code)
+    Settings.lang = code
+    saveSettings()
+    applyLang()
+    applyTheme()
+end
+
+for _, code in ipairs({"vi", "en"}) do
+    local b = card(LangRow)
+    b.Size = UDim2.new(0.5, -5, 1, 0)
+    local l = newLabel(b, 14, "Text", Enum.TextXAlignment.Center)
+    l.Size = UDim2.fromScale(1, 1)
+    l.ZIndex = 2
+    loc(l, "lang_" .. code)
+    b.MouseButton1Click:Connect(function() setLang(code) end)
+    LangButtons[code] = b
+end
+
+table.insert(ThemeUpdaters, function()
+    for code, b in pairs(LangButtons) do
+        local active = (Settings.lang == code)
+        b:SetAttribute("Active", active)
+        b.BackgroundColor3 = active and Theme.CardHi or Theme.Panel
+    end
+end)
+
+-- Màu menu (có sẵn)
+sectionLabel(PageSettings, "st_color")
+
+local SwatchRow = Instance.new("Frame")
+SwatchRow.Size = UDim2.new(1, -10, 0, 40)
+SwatchRow.BackgroundTransparency = 1
+place(SwatchRow, PageSettings)
+SwatchRow.Parent = PageSettings
+local SwatchLayout = Instance.new("UIListLayout")
+SwatchLayout.FillDirection = Enum.FillDirection.Horizontal
+SwatchLayout.Padding = UDim.new(0, 12)
+SwatchLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+SwatchLayout.SortOrder = Enum.SortOrder.LayoutOrder
+SwatchLayout.Parent = SwatchRow
+
+local Swatches = {}
+local hueKnob -- khai báo trước, gán ở dưới
+
+local function chooseHue(h, save)
+    Settings.preset = "custom"
+    Settings.hue = h
+    setThemeFromHue(h)
+    applyTheme()
+    if save then saveSettings() end
+end
+
+for _, p in ipairs(Presets) do
+    local s = Instance.new("TextButton")
+    s.Size = UDim2.fromOffset(34, 34)
+    s.Text = ""
+    s.AutoButtonColor = false
+    s.BackgroundColor3 = p.Accent
+    place(s, SwatchRow)
+    s.Parent = SwatchRow
+    corner(s, 17)
+    local ring = Instance.new("UIStroke")
+    ring.Thickness = 2.5
+    ring.Color = Theme.Text
+    ring.Transparency = 1
+    ring.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    ring.Parent = s
+    s.MouseButton1Click:Connect(function()
+        Settings.preset = p.id
+        setThemeFromPreset(p)
+        applyTheme()
+        saveSettings()
+    end)
+    Swatches[p.id] = ring
+end
+
+table.insert(ThemeUpdaters, function()
+    for id, ring in pairs(Swatches) do
+        ring.Transparency = (Settings.preset == id) and 0 or 1
+    end
+end)
+
+-- Màu tùy chỉnh (thanh kéo)
+sectionLabel(PageSettings, "st_hue")
+
+local HueRow = Instance.new("Frame")
+HueRow.Size = UDim2.new(1, -10, 0, 46)
+HueRow.BorderSizePixel = 0
+themed(HueRow, "BackgroundColor3", "Panel")
+place(HueRow, PageSettings)
+HueRow.Parent = PageSettings
+corner(HueRow, 11)
+stroke(HueRow, "Accent", 1, 0.6)
+
+local HueBar = Instance.new("Frame")
+HueBar.BackgroundColor3 = Color3.new(1, 1, 1)
+HueBar.Position = UDim2.new(0, 16, 0.5, -7)
+HueBar.Size = UDim2.new(1, -32, 0, 14)
+HueBar.Parent = HueRow
+corner(HueBar, 7)
+
+local points = {}
+for i = 0, 6 do
+    table.insert(points, ColorSequenceKeypoint.new(i / 6, Color3.fromHSV(i / 6, 1, 1)))
+end
+local HueGradient = Instance.new("UIGradient")
+HueGradient.Color = ColorSequence.new(points)
+HueGradient.Parent = HueBar
+
+hueKnob = Instance.new("Frame")
+hueKnob.AnchorPoint = Vector2.new(0.5, 0.5)
+hueKnob.Size = UDim2.fromOffset(20, 20)
+hueKnob.Position = UDim2.new(Settings.hue, 0, 0.5, 0)
+hueKnob.ZIndex = 3
+hueKnob.Parent = HueBar
+corner(hueKnob, 10)
+local knobRing = Instance.new("UIStroke")
+knobRing.Thickness = 2.5
+knobRing.Color = Theme.Text
+knobRing.Parent = hueKnob
+
+table.insert(ThemeUpdaters, function()
+    hueKnob.BackgroundColor3 = Color3.fromHSV(Settings.hue, 1, 1)
+end)
+
+local draggingHue = false
+local function hueFromX(x)
+    local rel = math.clamp((x - HueBar.AbsolutePosition.X) / math.max(HueBar.AbsoluteSize.X, 1), 0, 1)
+    hueKnob.Position = UDim2.new(rel, 0, 0.5, 0)
+    chooseHue(rel, false)
+end
+
+HueRow.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+    or input.UserInputType == Enum.UserInputType.Touch then
+        draggingHue = true
+        PageSettings.ScrollingEnabled = false
+        hueFromX(input.Position.X)
+    end
+end)
+
+bind("hueMove", UserInputService.InputChanged:Connect(function(input)
+    if draggingHue and (input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch) then
+        hueFromX(input.Position.X)
+    end
+end))
+
+bind("hueEnd", UserInputService.InputEnded:Connect(function(input)
+    if draggingHue and (input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch) then
+        draggingHue = false
+        PageSettings.ScrollingEnabled = true
+        saveSettings()
+    end
+end))
+
+-- Dynamic Island: công tắc bật / tắt
+local IslandRow = card(PageSettings)
+local IslandLbl = newLabel(IslandRow, 14, "Text")
+IslandLbl.Position = UDim2.fromOffset(16, 0)
+IslandLbl.Size = UDim2.new(1, -90, 1, 0)
+IslandLbl.TextTruncate = Enum.TextTruncate.AtEnd
+IslandLbl.ZIndex = 2
+loc(IslandLbl, "st_island")
+
+local IslandTrack = Instance.new("Frame")
+IslandTrack.AnchorPoint = Vector2.new(1, 0.5)
+IslandTrack.Position = UDim2.new(1, -14, 0.5, 0)
+IslandTrack.Size = UDim2.fromOffset(46, 24)
+IslandTrack.BorderSizePixel = 0
+IslandTrack.ZIndex = 2
+IslandTrack.Parent = IslandRow
+corner(IslandTrack, 12)
+local IslandKnob = Instance.new("Frame")
+IslandKnob.Size = UDim2.fromOffset(18, 18)
+IslandKnob.BackgroundColor3 = Color3.new(1, 1, 1)
+IslandKnob.BorderSizePixel = 0
+IslandKnob.ZIndex = 3
+IslandKnob.Parent = IslandTrack
+corner(IslandKnob, 9)
+
+local function paintIslandSwitch(animate)
+    local on = Settings.island
+    local pos = on and UDim2.fromOffset(25, 3) or UDim2.fromOffset(3, 3)
+    local col = on and Theme.Good or Theme.CardHi
+    if animate then
+        TweenService:Create(IslandKnob, TweenInfo.new(0.25, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {Position = pos}):Play()
+        TweenService:Create(IslandTrack, TweenInfo.new(0.25), {BackgroundColor3 = col}):Play()
+    else
+        IslandKnob.Position = pos
+        IslandTrack.BackgroundColor3 = col
+    end
+end
+paintIslandSwitch(false)
+table.insert(ThemeUpdaters, function() paintIslandSwitch(false) end)
+IslandRow.MouseButton1Click:Connect(function()
+    if setIslandEnabled then setIslandEnabled(not Settings.island) end
+    paintIslandSwitch(true)
+end)
+
+-- Phím tắt
+local KeysNote = newLabel(PageSettings, 12, "SubText")
+KeysNote.Size = UDim2.new(1, -10, 0, IS_TOUCH and 34 or 22)
+KeysNote.TextWrapped = true
+place(KeysNote, PageSettings)
+loc(KeysNote, IS_TOUCH and "st_keys_touch" or "st_keys")
+
+bind("hotkey", UserInputService.InputBegan:Connect(function(input, gp)
+    if not gp and input.KeyCode == Enum.KeyCode.RightShift then
+        setMenuVisible(not Wrapper.Visible)
+    end
+end))
+
+end
+
+----------------------------------------------------------------
+-- HỒI SINH: áp lại tính năng đang bật
+----------------------------------------------------------------
+bind("respawn", LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    Saved.walk, Saved.jump, Saved.invis = nil, nil, nil
+    for id, f in pairs(Features) do
+        if ScriptStates[id] then pcall(f, true) end
+    end
+end))
+
+----------------------------------------------------------------
+-- ẢNH NÚT BẬT/TẮT MENU
+----------------------------------------------------------------
+-- Cách 1 (tự động, cần executor có writefile + getcustomasset): ảnh được nhúng sẵn bên dưới.
+-- Cách 2: tự upload ảnh lên Roblox rồi điền vào đây, ví dụ "rbxassetid://1234567890".
+local TOGGLE_IMAGE_ID = ""
+
+local TOGGLE_IMG_B64 = [=[
+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
+k=
+]=]
+
+local B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+local B64_LOOKUP = {}
+for i = 1, #B64_CHARS do B64_LOOKUP[B64_CHARS:byte(i)] = i - 1 end
+
+local function b64decode(s)
+    s = s:gsub("%s", "")
+    local out = {}
+    for i = 1, #s, 4 do
+        local a, b, c, d = s:byte(i, i + 3)
+        local n = (B64_LOOKUP[a] or 0) * 262144 + (B64_LOOKUP[b] or 0) * 4096
+            + (B64_LOOKUP[c] or 0) * 64 + (B64_LOOKUP[d] or 0)
+        local b1, b2, b3 = math.floor(n / 65536) % 256, math.floor(n / 256) % 256, n % 256
+        if c == 61 then
+            out[#out + 1] = string.char(b1)
+        elseif d == 61 then
+            out[#out + 1] = string.char(b1, b2)
+        else
+            out[#out + 1] = string.char(b1, b2, b3)
+        end
+    end
+    return table.concat(out)
+end
+
+local function loadToggleImage()
+    if TOGGLE_IMAGE_ID ~= "" then return TOGGLE_IMAGE_ID end
+    local ok, result = pcall(function()
+        local getAsset = getcustomasset or getsynasset
+        if not (writefile and getAsset) then return nil end
+        local path = "BomHub_toggle.jpg"
+        writefile(path, b64decode(TOGGLE_IMG_B64))
+        return getAsset(path)
+    end)
+    if ok and result and result ~= "" then return result end
+    return nil
+end
+
+----------------------------------------------------------------
+-- NÚT TRÒN NỔI (kéo thả, chạm để mở/đóng menu)
+----------------------------------------------------------------
+local TOGGLE_SIZE = IS_TOUCH and 60 or 56
+
+local ToggleWrapper = Instance.new("Frame")
+ToggleWrapper.Name = "ToggleWrapper"
+ToggleWrapper.AnchorPoint = Vector2.new(1, 1)
+ToggleWrapper.Position = UDim2.new(1, -20, 1, -20)
+ToggleWrapper.Size = UDim2.fromOffset(TOGGLE_SIZE, TOGGLE_SIZE)
+ToggleWrapper.BackgroundTransparency = 1
+ToggleWrapper.ZIndex = 10
+ToggleWrapper.Parent = ScreenGui
+
+for _, spec in ipairs({{pad = 6, dy = 3, trans = 0.6}, {pad = 14, dy = 6, trans = 0.8}}) do
+    local layer = Instance.new("Frame")
+    layer.AnchorPoint = Vector2.new(0.5, 0.5)
+    layer.Position = UDim2.new(0.5, 0, 0.5, spec.dy)
+    layer.Size = UDim2.fromOffset(TOGGLE_SIZE + spec.pad, TOGGLE_SIZE + spec.pad)
+    layer.BackgroundColor3 = Color3.new(0, 0, 0)
+    layer.BackgroundTransparency = spec.trans
+    layer.BorderSizePixel = 0
+    layer.ZIndex = 1
+    layer.Parent = ToggleWrapper
+    corner(layer, (TOGGLE_SIZE + spec.pad) / 2)
+end
+
+local ToggleBtn = Instance.new("TextButton")
+ToggleBtn.Name = "ToggleBtn"
+ToggleBtn.AnchorPoint = Vector2.new(0.5, 0.5)
+ToggleBtn.Position = UDim2.fromScale(0.5, 0.5)
+ToggleBtn.Size = UDim2.fromOffset(TOGGLE_SIZE, TOGGLE_SIZE)
+ToggleBtn.AutoButtonColor = false
+ToggleBtn.Text = ""
+ToggleBtn.ZIndex = 2
+themed(ToggleBtn, "BackgroundColor3", "Panel")
+ToggleBtn.Parent = ToggleWrapper
+corner(ToggleBtn, TOGGLE_SIZE / 2)
+stroke(ToggleBtn, "Accent", 2, 0.1)
+
+local ToggleIcon = Instance.new("Frame")
+ToggleIcon.AnchorPoint = Vector2.new(0.5, 0.5)
+ToggleIcon.Position = UDim2.fromScale(0.5, 0.5)
+ToggleIcon.Size = UDim2.fromOffset(16, 16)
+ToggleIcon.Rotation = 45
+ToggleIcon.BorderSizePixel = 0
+ToggleIcon.ZIndex = 3
+themed(ToggleIcon, "BackgroundColor3", "Accent")
+ToggleIcon.Parent = ToggleBtn
+corner(ToggleIcon, 4)
+
+local ToggleImage = Instance.new("ImageLabel")
+ToggleImage.Name = "ToggleImage"
+ToggleImage.AnchorPoint = Vector2.new(0.5, 0.5)
+ToggleImage.Position = UDim2.fromScale(0.5, 0.5)
+ToggleImage.Size = UDim2.new(1, -6, 1, -6)
+ToggleImage.BackgroundTransparency = 1
+ToggleImage.ScaleType = Enum.ScaleType.Crop
+ToggleImage.ZIndex = 4
+ToggleImage.Visible = false
+ToggleImage.Parent = ToggleBtn
+local ToggleImageCorner = Instance.new("UICorner")
+ToggleImageCorner.CornerRadius = UDim.new(0.5, 0)
+ToggleImageCorner.Parent = ToggleImage
+
+task.spawn(function()
+    local asset = loadToggleImage()
+    if not asset then return end
+    ToggleImage.Image = asset
+    local t0 = os.clock()
+    while not ToggleImage.IsLoaded and os.clock() - t0 < 4 do task.wait(0.1) end
+    if ToggleImage.IsLoaded then -- ảnh lỗi thì giữ hình thoi, không hiện ô trống
+        ToggleImage.Visible = true
+        ToggleIcon.Visible = false
+    end
+end)
+
+local function makeDraggableToggleGroup(handle, target, onTap)
+    local dragInput, moved, dragStart, startPos
+    local DRAG_THRESHOLD = IS_TOUCH and 10 or 6
+
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+            dragInput = input
+            moved = false
+            dragStart = input.Position
+            startPos = target.Position
+        end
+    end)
+
+    table.insert(DragConns, UserInputService.InputChanged:Connect(function(input)
+        if not dragInput then return end
+        local isMove = (dragInput.UserInputType == Enum.UserInputType.Touch and input == dragInput)
+            or (dragInput.UserInputType == Enum.UserInputType.MouseButton1
+                and input.UserInputType == Enum.UserInputType.MouseMovement)
+        if isMove then
+            local delta = input.Position - dragStart
+            if delta.Magnitude > DRAG_THRESHOLD then moved = true end
+            if moved then
+                target.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X,
+                                             startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+            end
+        end
+    end))
+
+    table.insert(DragConns, UserInputService.InputEnded:Connect(function(input)
+        if dragInput and (input == dragInput
+            or (dragInput.UserInputType == Enum.UserInputType.MouseButton1
+                and input.UserInputType == Enum.UserInputType.MouseButton1)) then
+            local wasMoved = moved
+            dragInput = nil
+            if not wasMoved then onTap() end
+        end
+    end))
+end
+
+makeDraggableToggleGroup(ToggleBtn, ToggleWrapper, function()
+    setMenuVisible(not Wrapper.Visible)
+end)
+
+----------------------------------------------------------------
+-- DYNAMIC ISLAND (viên thuốc ở giữa đỉnh màn hình)
+-- thu gọn: FPS + ping | bật/tắt tính năng: nở ra báo nhanh rồi thu lại | chạm: mở bảng trạng thái
+----------------------------------------------------------------
+do
+    local SIZES = {
+        compact = {w = 156, h = 34,  r = 17},
+        toast   = {w = 262, h = 46,  r = 23},
+        full    = {w = 322, h = 124, r = 30},
+    }
+
+    local island = Instance.new("Frame")
+    island.Name = "DynamicIsland"
+    island.AnchorPoint = Vector2.new(0.5, 0)
+    island.Position = UDim2.new(0.5, Settings.islandX, 0, Settings.islandY)
+    island.Visible = Settings.island
+    island.Size = UDim2.fromOffset(SIZES.compact.w, SIZES.compact.h)
+    island.BackgroundColor3 = Color3.new(0, 0, 0)
+    island.BorderSizePixel = 0
+    island.ClipsDescendants = true
+    island.ZIndex = 50
+    island.Parent = ScreenGui
+    local islandCorner = corner(island, SIZES.compact.r)
+    stroke(island, "Accent", 1, 0.55)
+
+    -- lớp bắt chạm (nằm dưới các nút bên trong)
+    local hit = Instance.new("TextButton")
+    hit.Text = ""
+    hit.AutoButtonColor = false
+    hit.BackgroundTransparency = 1
+    hit.Size = UDim2.fromScale(1, 1)
+    hit.ZIndex = 51
+    hit.Parent = island
+
+    local function container()
+        local c = Instance.new("CanvasGroup")
+        c.BackgroundTransparency = 1
+        c.Size = UDim2.fromScale(1, 1)
+        c.ZIndex = 52
+        c.GroupTransparency = 1
+        c.Visible = false
+        c.Parent = island
+        return c
+    end
+
+    local function dotIn(parent, x, size)
+        local d = Instance.new("Frame")
+        d.AnchorPoint = Vector2.new(0, 0.5)
+        d.Position = UDim2.new(0, x, 0.5, 0)
+        d.Size = UDim2.fromOffset(size, size)
+        d.BorderSizePixel = 0
+        d.Parent = parent
+        corner(d, size)
+        return d
+    end
+
+    -- 1) thu gọn
+    local cC = container()
+    local cDot = dotIn(cC, 14, 8)
+    local cLbl = newLabel(cC, 12, "Text", Enum.TextXAlignment.Center)
+    cLbl.Position = UDim2.fromOffset(26, 0)
+    cLbl.Size = UDim2.new(1, -38, 1, 0)
+
+    -- 2) thông báo bật/tắt
+    local tC = container()
+    local tDot = dotIn(tC, 18, 10)
+    local tName = newLabel(tC, 14, "Text")
+    tName.Position = UDim2.fromOffset(40, 0)
+    tName.Size = UDim2.new(1, -112, 1, 0)
+    tName.TextTruncate = Enum.TextTruncate.AtEnd
+    local tState = newLabel(tC, 13, "Text", Enum.TextXAlignment.Right)
+    tState.AnchorPoint = Vector2.new(1, 0)
+    tState.Position = UDim2.new(1, -18, 0, 0)
+    tState.Size = UDim2.fromOffset(60, SIZES.toast.h)
+
+    -- 3) mở rộng
+    local fC = container()
+    local fStats = newLabel(fC, 13, "Text")
+    fStats.Position = UDim2.fromOffset(20, 14)
+    fStats.Size = UDim2.new(1, -40, 0, 20)
+    local fList = newLabel(fC, 12, "SubText")
+    fList.Font = Enum.Font.Gotham
+    fList.Position = UDim2.fromOffset(20, 38)
+    fList.Size = UDim2.new(1, -40, 0, 36)
+    fList.TextWrapped = true
+    fList.TextYAlignment = Enum.TextYAlignment.Top
+    local fBtn = Instance.new("TextButton")
+    fBtn.Font = Enum.Font.GothamBold
+    fBtn.TextSize = 13
+    fBtn.TextColor3 = Color3.new(0, 0, 0)
+    fBtn.AutoButtonColor = false
+    fBtn.BorderSizePixel = 0
+    fBtn.Position = UDim2.fromOffset(20, 80)
+    fBtn.Size = UDim2.new(1, -40, 0, 30)
+    themed(fBtn, "BackgroundColor3", "Accent")
+    fBtn.Parent = fC
+    corner(fBtn, 15)
+
+    local containers = {compact = cC, toast = tC, full = fC}
+    local state, tok = "compact", 0
+
+    local function activeNames()
+        local names = {}
+        for id, on in pairs(ScriptStates) do
+            if on then table.insert(names, T("sc_" .. id)) end
+        end
+        table.sort(names)
+        return names
+    end
+
+    local fpsv = 60
+    bind("island_fps", RunService.RenderStepped:Connect(function(dt)
+        if dt > 0 then fpsv = fpsv + (1 / dt - fpsv) * 0.1 end
+    end))
+
+    local function refresh()
+        local names = activeNames()
+        local ok, ping = pcall(function() return Stats.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+        local pingTxt = ok and (math.floor(ping) .. " ms") or "? ms"
+        local fpsTxt = math.floor(fpsv + 0.5) .. " FPS"
+        cLbl.Text = fpsTxt .. " | " .. pingTxt
+        cDot.BackgroundColor3 = #names > 0 and Theme.Good or Theme.SubText
+        fStats.Text = fpsTxt .. "  |  " .. pingTxt .. "  |  " .. #names .. " " .. T("isl_active")
+        fList.Text = #names > 0 and table.concat(names, ", ") or T("isl_none")
+        fBtn.Text = T(Wrapper.Visible and "isl_hide" or "isl_open")
+    end
+    table.insert(ThemeUpdaters, refresh)
+    table.insert(LangUpdaters, refresh)
+    Wrapper:GetPropertyChangedSignal("Visible"):Connect(refresh)
+
+    local function setState(new)
+        tok += 1
+        local my = tok
+        local old = state
+        state = new
+        local sz = SIZES[new]
+        local info = (new == "compact")
+            and TweenInfo.new(0.38, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+            or TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out)
+        TweenService:Create(island, info, {Size = UDim2.fromOffset(sz.w, sz.h)}):Play()
+        TweenService:Create(islandCorner, info, {CornerRadius = UDim.new(0, sz.r)}):Play()
+
+        if new == old then return end
+        local prev, nxt = containers[old], containers[new]
+        TweenService:Create(prev, TweenInfo.new(0.12), {GroupTransparency = 1}):Play()
+        task.delay(0.13, function()
+            if tok == my then prev.Visible = false end
+        end)
+        nxt.Visible = true
+        nxt.GroupTransparency = 1
+        task.delay(0.1, function()
+            if tok == my then
+                TweenService:Create(nxt, TweenInfo.new(0.22), {GroupTransparency = 0}):Play()
+            end
+        end)
+    end
+
+    -- khởi tạo: hiện bản thu gọn
+    cC.Visible = true
+    cC.GroupTransparency = 0
+    refresh()
+
+    task.spawn(function()
+        while ScreenGui.Parent do
+            refresh()
+            task.wait(0.5)
+        end
+    end)
+
+    local function tap()
+        if state == "full" then
+            setState("compact")
+        else
+            refresh()
+            setState("full")
+            local my = tok
+            task.delay(8, function()
+                if tok == my and state == "full" then setState("compact") end
+            end)
+        end
+    end
+
+    -- kéo để di chuyển, chạm nhẹ để mở / thu bảng
+    local DRAG_THRESHOLD = IS_TOUCH and 10 or 6
+    local dragInput, moved, dragStart, startPos
+
+    local function isPress(i)
+        return i.UserInputType == Enum.UserInputType.MouseButton1
+            or i.UserInputType == Enum.UserInputType.Touch
+    end
+
+    hit.InputBegan:Connect(function(input)
+        if isPress(input) and not dragInput then
+            dragInput, moved = input, false
+            dragStart, startPos = input.Position, island.Position
+        end
+    end)
+
+    bind("island_move", UserInputService.InputChanged:Connect(function(input)
+        if not dragInput then return end
+        if input == dragInput or input.UserInputType == Enum.UserInputType.MouseMovement then
+            local d = input.Position - dragStart
+            if d.Magnitude > DRAG_THRESHOLD then moved = true end
+            if moved then
+                island.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X,
+                                            startPos.Y.Scale, math.max(0, startPos.Y.Offset + d.Y))
+            end
+        end
+    end))
+
+    bind("island_end", UserInputService.InputEnded:Connect(function(input)
+        if not dragInput then return end
+        if input == dragInput or (dragInput.UserInputType == Enum.UserInputType.MouseButton1
+            and input.UserInputType == Enum.UserInputType.MouseButton1) then
+            local wasMoved = moved
+            dragInput = nil
+            if wasMoved then
+                Settings.islandX = island.Position.X.Offset
+                Settings.islandY = island.Position.Y.Offset
+                saveSettings()
+            else
+                tap()
+            end
+        end
+    end))
+
+    fBtn.MouseButton1Click:Connect(function()
+        setMenuVisible(not Wrapper.Visible)
+    end)
+
+    -- được gọi mỗi khi một tính năng bật/tắt
+    setIslandEnabled = function(on)
+        Settings.island = on
+        island.Visible = on
+        saveSettings()
+    end
+
+    islandNotify = function(id, on)
+        if not Settings.island then return end
+        local col = on and Theme.Good or Theme.SubText
+        tName.Text = T("sc_" .. id)
+        tState.Text = T(on and "isl_on" or "isl_off")
+        tState.TextColor3 = col
+        tDot.BackgroundColor3 = col
+        refresh()
+        if state == "full" then return end
+        setState("toast")
+        local my = tok
+        task.delay(2.2, function()
+            if tok == my and state == "toast" then setState("compact") end
+        end)
+    end
+end
+
+----------------------------------------------------------------
+-- KHỞI TẠO
+----------------------------------------------------------------
+applyTheme()
+setTab("scripts") -- gọi applyLang bên trong
+
+----------------------------------------------------------------
+-- MÀN HÌNH LOAD KHI MỚI MỞ (hiệu ứng mở đầu, chạy ~2 giây)
+----------------------------------------------------------------
+local function runIntro()
+    local island = ScreenGui:FindFirstChild("DynamicIsland")
+    MenuLocked = true
+    Wrapper.Visible = false
+    ToggleWrapper.Visible = false
+    if island then island.Visible = false end
+
+    local L = Instance.new("CanvasGroup")
+    L.Name = "Loader"
+    L.AnchorPoint = Vector2.new(0.5, 0.5)
+    L.Position = UDim2.fromScale(0.5, 0.5)
+    L.Size = UDim2.fromOffset(300, 196)
+    L.BorderSizePixel = 0
+    L.ZIndex = 100
+    L.GroupTransparency = 1
+    themed(L, "BackgroundColor3", "Panel")
+    L.Parent = ScreenGui
+    corner(L, 20)
+    stroke(L, "Accent", 1.5, 0.35)
+    local LS = Instance.new("UIScale")
+    LS.Scale = 0.85
+    LS.Parent = L
+
+    -- logo: avatar (hoặc hình thoi) + vòng sáng quay
+    local logo = Instance.new("Frame")
+    logo.AnchorPoint = Vector2.new(0.5, 0)
+    logo.Position = UDim2.new(0.5, 0, 0, 24)
+    logo.Size = UDim2.fromOffset(64, 64)
+    logo.BorderSizePixel = 0
+    themed(logo, "BackgroundColor3", "Card")
+    logo.Parent = L
+    corner(logo, 32)
+
+    local ring = stroke(logo, "Accent", 3, 0)
+    local spin = Instance.new("UIGradient")
+    spin.Transparency = NumberSequence.new({
+        NumberSequenceKeypoint.new(0, 0),
+        NumberSequenceKeypoint.new(0.6, 0.85),
+        NumberSequenceKeypoint.new(1, 1),
+    })
+    spin.Parent = ring
+    local spinTween = TweenService:Create(spin,
+        TweenInfo.new(1.1, Enum.EasingStyle.Linear, Enum.EasingDirection.In, -1), {Rotation = 360})
+    spinTween:Play()
+
+    if Avatar.Image ~= "" then
+        local img = Instance.new("ImageLabel")
+        img.Size = UDim2.new(1, -8, 1, -8)
+        img.Position = UDim2.fromOffset(4, 4)
+        img.BackgroundTransparency = 1
+        img.Image = Avatar.Image
+        img.Parent = logo
+        corner(img, 28)
+    else
+        local dia = Instance.new("Frame")
+        dia.AnchorPoint = Vector2.new(0.5, 0.5)
+        dia.Position = UDim2.fromScale(0.5, 0.5)
+        dia.Size = UDim2.fromOffset(18, 18)
+        dia.Rotation = 45
+        dia.BorderSizePixel = 0
+        themed(dia, "BackgroundColor3", "Accent")
+        dia.Parent = logo
+        corner(dia, 4)
+        TweenService:Create(dia, TweenInfo.new(0.9, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+            {Size = UDim2.fromOffset(26, 26)}):Play()
+    end
+
+    local name = newLabel(L, 18, "Text", Enum.TextXAlignment.Center)
+    name.Position = UDim2.fromOffset(0, 100)
+    name.Size = UDim2.new(1, 0, 0, 24)
+    name.Text = "Dom2dev Hub"
+
+    local status = newLabel(L, 12, "SubText", Enum.TextXAlignment.Center)
+    status.Font = Enum.Font.Gotham
+    status.Position = UDim2.fromOffset(0, 128)
+    status.Size = UDim2.new(1, 0, 0, 18)
+    status.Text = ""
+
+    local track = Instance.new("Frame")
+    track.AnchorPoint = Vector2.new(0.5, 0)
+    track.Position = UDim2.new(0.5, 0, 0, 158)
+    track.Size = UDim2.new(1, -60, 0, 6)
+    track.BorderSizePixel = 0
+    themed(track, "BackgroundColor3", "CardHi")
+    track.Parent = L
+    corner(track, 3)
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.fromScale(0, 1)
+    fill.BorderSizePixel = 0
+    themed(fill, "BackgroundColor3", "Accent")
+    fill.Parent = track
+    corner(fill, 3)
+
+    local function alive() return ScreenGui.Parent ~= nil end
+
+    TweenService:Create(L, TweenInfo.new(0.35), {GroupTransparency = 0}):Play()
+    TweenService:Create(LS, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+    task.wait(0.4)
+
+    local steps = {{"ld_ui", 0.25}, {"ld_settings", 0.5}, {"ld_features", 0.75}, {"ld_theme", 0.92}, {"ld_ready", 1}}
+    for _, st in ipairs(steps) do
+        if not alive() then return end
+        status.Text = T(st[1])
+        TweenService:Create(fill, TweenInfo.new(0.4, Enum.EasingStyle.Quint, Enum.EasingDirection.Out),
+            {Size = UDim2.fromScale(st[2], 1)}):Play()
+        task.wait(0.42)
+    end
+    task.wait(0.2)
+    if not alive() then return end
+
+    -- loader mờ dần + nở nhẹ rồi biến mất
+    TweenService:Create(L, TweenInfo.new(0.3), {GroupTransparency = 1}):Play()
+    TweenService:Create(LS, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Scale = 1.1}):Play()
+    task.wait(0.3)
+    spinTween:Cancel()
+    L:Destroy()
+    if not alive() then return end
+
+    -- màn hình chọn danh hiệu: MEMBER hoặc ADMIN
+    local chosen
+    local gold = rgb(255, 196, 60)
+
+    local R = Instance.new("CanvasGroup")
+    R.Name = "RoleSelect"
+    R.AnchorPoint = Vector2.new(0.5, 0.5)
+    R.Position = UDim2.fromScale(0.5, 0.5)
+    R.Size = UDim2.fromOffset(360, 232)
+    R.BorderSizePixel = 0
+    R.ZIndex = 100
+    R.GroupTransparency = 1
+    themed(R, "BackgroundColor3", "Panel")
+    R.Parent = ScreenGui
+    corner(R, 20)
+    stroke(R, "Accent", 1.5, 0.35)
+    local RS = Instance.new("UIScale")
+    RS.Scale = 0.85
+    RS.Parent = R
+
+    local rTitle = newLabel(R, 18, "Text", Enum.TextXAlignment.Center)
+    rTitle.Position = UDim2.fromOffset(0, 20)
+    rTitle.Size = UDim2.new(1, 0, 0, 24)
+    loc(rTitle, "rs_title")
+    local rSub = newLabel(R, 12, "SubText", Enum.TextXAlignment.Center)
+    rSub.Font = Enum.Font.Gotham
+    rSub.Position = UDim2.fromOffset(0, 48)
+    rSub.Size = UDim2.new(1, 0, 0, 18)
+    loc(rSub, "rs_sub")
+
+    local options = {}
+    local openKeyPanel
+
+    local function choose(role)
+        if chosen then return end
+        chosen = role
+        local o = options[role]
+        if o then
+            TweenService:Create(o.sc, TweenInfo.new(0.35, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1.12}):Play()
+        end
+        for r, other in pairs(options) do
+            if r ~= role then TweenService:Create(other.btn, TweenInfo.new(0.2), {BackgroundTransparency = 0.7}):Play() end
+        end
+    end
+
+    local function roleOption(role, x)
+        local isAdmin = (role == "admin")
+        local b = Instance.new("TextButton")
+        b.Text = ""
+        b.AutoButtonColor = false
+        b.BorderSizePixel = 0
+        b.Position = UDim2.fromOffset(x, 86)
+        b.Size = UDim2.fromOffset(150, 124)
+        if isAdmin then
+            b.BackgroundColor3 = rgb(48, 36, 8)
+        else
+            themed(b, "BackgroundColor3", "Card")
+        end
+        b.Parent = R
+        corner(b, 16)
+
+        local st
+        if isAdmin then
+            st = Instance.new("UIStroke")
+            st.Color = Color3.new(1, 1, 1)
+            st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+            st.Parent = b
+            local gr = Instance.new("UIGradient")
+            gr.Color = ColorSequence.new({
+                ColorSequenceKeypoint.new(0, gold),
+                ColorSequenceKeypoint.new(0.5, rgb(255, 245, 200)),
+                ColorSequenceKeypoint.new(1, gold),
+            })
+            gr.Parent = st
+            TweenService:Create(gr, TweenInfo.new(2.4, Enum.EasingStyle.Linear, Enum.EasingDirection.In, -1),
+                {Rotation = 360}):Play()
+        else
+            st = stroke(b, "Accent", 1.5, 0.3)
+        end
+        st.Thickness = (Settings.role == role) and 3 or 1.5
+
+        local icon = Instance.new("Frame")
+        icon.AnchorPoint = Vector2.new(0.5, 0)
+        icon.Position = UDim2.new(0.5, 0, 0, 14)
+        icon.Size = UDim2.fromOffset(44, 44)
+        icon.BorderSizePixel = 0
+        if isAdmin then icon.BackgroundColor3 = gold else themed(icon, "BackgroundColor3", "Accent") end
+        icon.Parent = b
+        corner(icon, 22)
+        local letter = Instance.new("TextLabel")
+        letter.BackgroundTransparency = 1
+        letter.Size = UDim2.fromScale(1, 1)
+        letter.Font = Enum.Font.GothamBold
+        letter.TextSize = 20
+        letter.TextColor3 = Color3.new(0, 0, 0)
+        letter.Text = isAdmin and "A" or "M"
+        letter.Parent = icon
+
+        local nm = newLabel(b, 15, "Text", Enum.TextXAlignment.Center)
+        nm.Position = UDim2.fromOffset(0, 66)
+        nm.Size = UDim2.new(1, 0, 0, 20)
+        loc(nm, isAdmin and "role_admin" or "role_member")
+        if isAdmin then
+            for i = #Themed, 1, -1 do
+                if Themed[i][1] == nm then table.remove(Themed, i) end
+            end
+            nm.TextColor3 = gold
+        end
+
+        local ds = newLabel(b, 11, "SubText", Enum.TextXAlignment.Center)
+        ds.Font = Enum.Font.Gotham
+        ds.Position = UDim2.fromOffset(8, 90)
+        ds.Size = UDim2.new(1, -16, 0, 26)
+        ds.TextWrapped = true
+        ds.TextYAlignment = Enum.TextYAlignment.Top
+        loc(ds, isAdmin and "rs_admin_desc" or "rs_member_desc")
+
+        local sc = Instance.new("UIScale")
+        sc.Parent = b
+        local function pop(v, t) TweenService:Create(sc, TweenInfo.new(t or 0.15, Enum.EasingStyle.Quad), {Scale = v}):Play() end
+        b.MouseEnter:Connect(function() if not chosen then pop(1.05) end end)
+        b.MouseLeave:Connect(function() if not chosen then pop(1) end end)
+        b.InputBegan:Connect(function(i)
+            if not chosen and (i.UserInputType == Enum.UserInputType.MouseButton1
+                or i.UserInputType == Enum.UserInputType.Touch) then pop(0.95, 0.08) end
+        end)
+        b.MouseButton1Click:Connect(function()
+            if chosen then return end
+            if isAdmin then openKeyPanel() else choose(role) end
+        end)
+        options[role] = {btn = b, sc = sc}
+        return b
+    end
+
+    local bm = roleOption("member", 24)
+    local ba = roleOption("admin", 186)
+
+    -- bảng nhập mã admin (trượt lên phủ thẻ chọn)
+    local RED = rgb(255, 110, 110)
+    local K = Instance.new("CanvasGroup")
+    K.Size = UDim2.fromScale(1, 1)
+    K.BorderSizePixel = 0
+    K.ZIndex = 5
+    K.GroupTransparency = 1
+    K.Visible = false
+    themed(K, "BackgroundColor3", "Panel")
+    K.Parent = R
+    corner(K, 20)
+
+    local kTitle = newLabel(K, 17, "Text", Enum.TextXAlignment.Center)
+    kTitle.Position = UDim2.fromOffset(0, 24)
+    kTitle.Size = UDim2.new(1, 0, 0, 24)
+    loc(kTitle, "ks_title")
+
+    local kBox = Instance.new("TextBox")
+    kBox.Position = UDim2.fromOffset(30, 68)
+    kBox.Size = UDim2.fromOffset(300, 42)
+    kBox.Font = Enum.Font.Code
+    kBox.TextSize = 16
+    kBox.Text = ""
+    kBox.ClearTextOnFocus = false
+    kBox.TextColor3 = Theme.Text
+    kBox.PlaceholderColor3 = Theme.SubText
+    themed(kBox, "BackgroundColor3", "Card")
+    kBox.Parent = K
+    corner(kBox, 10)
+    stroke(kBox, "Accent", 1.2, 0.4)
+    kBox.PlaceholderText = T("ks_ph")
+    table.insert(LangUpdaters, function() kBox.PlaceholderText = T("ks_ph") end)
+
+    local kMsg = newLabel(K, 12, "SubText", Enum.TextXAlignment.Center)
+    kMsg.Font = Enum.Font.Gotham
+    kMsg.Position = UDim2.fromOffset(0, 118)
+    kMsg.Size = UDim2.new(1, 0, 0, 18)
+    kMsg.Text = ""
+
+    local function kButton(key, x, accent)
+        local kb = Instance.new("TextButton")
+        kb.Position = UDim2.fromOffset(x, 160)
+        kb.Size = UDim2.fromOffset(150, 40)
+        kb.Font = Enum.Font.GothamBold
+        kb.TextSize = 13
+        kb.AutoButtonColor = false
+        kb.BorderSizePixel = 0
+        kb.Text = T(key)
+        table.insert(LangUpdaters, function() kb.Text = T(key) end)
+        if accent then
+            themed(kb, "BackgroundColor3", "Accent")
+            kb.TextColor3 = Color3.new(0, 0, 0)
+        else
+            themed(kb, "BackgroundColor3", "Card")
+            kb.TextColor3 = Theme.Text
+            stroke(kb, "Accent", 1, 0.5)
+        end
+        kb.Parent = K
+        corner(kb, 12)
+        local ks = Instance.new("UIScale")
+        ks.Parent = kb
+        kb.MouseEnter:Connect(function() TweenService:Create(ks, TweenInfo.new(0.12), {Scale = 1.04}):Play() end)
+        kb.MouseLeave:Connect(function() TweenService:Create(ks, TweenInfo.new(0.12), {Scale = 1}):Play() end)
+        kb.InputBegan:Connect(function(i)
+            if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+                TweenService:Create(ks, TweenInfo.new(0.08), {Scale = 0.95}):Play()
+            end
+        end)
+        return kb
+    end
+    local kBack = kButton("ks_back", 24, false)
+    local kOk = kButton("ks_confirm", 186, true)
+
+    local keyOpen, locked, okDone, fails = false, false, false, 0
+
+    local function setMsg(key, col)
+        kMsg.Text = T(key)
+        kMsg.TextColor3 = col
+    end
+
+    local function shake()
+        local home = kBox.Position
+        task.spawn(function()
+            for _, dx in ipairs({10, -10, 6, -6, 0}) do
+                TweenService:Create(kBox, TweenInfo.new(0.05), {Position = home + UDim2.fromOffset(dx, 0)}):Play()
+                task.wait(0.055)
+            end
+            kBox.Position = home
+        end)
+    end
+
+    openKeyPanel = function()
+        keyOpen = true
+        kBox.Text = ""
+        kMsg.Text = ""
+        K.Visible = true
+        TweenService:Create(K, TweenInfo.new(0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {GroupTransparency = 0}):Play()
+    end
+
+    local function closeKeyPanel()
+        keyOpen = false
+        TweenService:Create(K, TweenInfo.new(0.22), {GroupTransparency = 1}):Play()
+        task.delay(0.24, function()
+            if not keyOpen then K.Visible = false end
+        end)
+    end
+
+    local function submit()
+        if chosen or locked or okDone then return end
+        local txt = (kBox.Text:gsub("^%s*(.-)%s*$", "%1"))
+        local keyOk = false
+        for _, k in ipairs(ADMIN_KEYS) do
+            if txt == k then keyOk = true end
+        end
+        if #ADMIN_KEYS == 0 then
+            setMsg("ks_nokey", RED)
+            shake()
+        elseif keyOk then
+            okDone = true
+            setMsg("ks_good", Theme.Good)
+            task.spawn(function()
+                task.wait(0.5)
+                closeKeyPanel()
+                task.wait(0.28)
+                choose("admin")
+            end)
+        else
+            fails += 1
+            setMsg("ks_wrong", RED)
+            shake()
+            if fails >= 3 then
+                fails, locked = 0, true
+                setMsg("ks_wait", RED)
+                task.delay(3, function()
+                    locked = false
+                    if not chosen and not okDone then kMsg.Text = "" end
+                end)
+            end
+        end
+    end
+
+    kOk.MouseButton1Click:Connect(submit)
+    kBox.FocusLost:Connect(function(enter) if enter then submit() end end)
+    kBack.MouseButton1Click:Connect(function()
+        if not okDone and not chosen then closeKeyPanel() end
+    end)
+
+    TweenService:Create(R, TweenInfo.new(0.35), {GroupTransparency = 0}):Play()
+    TweenService:Create(RS, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+    for i, b in ipairs({bm, ba}) do
+        local home = b.Position
+        b.Position = home + UDim2.fromOffset(0, 18)
+        task.delay(0.12 * i, function()
+            if b.Parent then
+                TweenService:Create(b, TweenInfo.new(0.45, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Position = home}):Play()
+            end
+        end)
+    end
+
+    while not chosen do
+        if not alive() then return end
+        task.wait(0.05)
+    end
+    task.wait(0.45)
+
+    ROLE = chosen
+    Settings.role = chosen
+    saveSettings()
+    buildRoleBadge()
+    refreshAdminNav()
+
+    TweenService:Create(R, TweenInfo.new(0.3), {GroupTransparency = 1}):Play()
+    TweenService:Create(RS, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Scale = 1.1}):Play()
+    task.wait(0.3)
+    R:Destroy()
+    if not alive() then return end
+
+    -- menu bật ra: phóng từ nhỏ lên, nảy nhẹ
+    MenuLocked = false
+    setMenuVisible(true)
+    ToggleWrapper.Visible = true
+    if island then island.Visible = Settings.island end
+end
+
+task.spawn(runIntro)
+
+return ScreenGui
